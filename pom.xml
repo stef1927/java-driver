@@ -10,6 +10,7 @@
 
   <modules>
     <module>driver-core</module>
+    <module>driver-mapping</module>
     <module>driver-examples</module>
   </modules>
 
