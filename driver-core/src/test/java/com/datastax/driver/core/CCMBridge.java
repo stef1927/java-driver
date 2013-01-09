@@ -46,8 +46,7 @@ public class CCMBridge {
     private final Runtime runtime = Runtime.getRuntime();
     private final File ccmDir;
 
-    private CCMBridge()
-    {
+    private CCMBridge() {
         this.ccmDir = Files.createTempDir();
     }
 
