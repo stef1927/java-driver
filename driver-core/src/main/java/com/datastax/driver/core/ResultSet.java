@@ -91,7 +91,7 @@ public class ResultSet implements Iterable<Row> {
     }
 
     /**
-     * Returns the the next result from this ResultSet.
+     * Returns the next result from this ResultSet.
      *
      * @return the next row in this resultSet or null if this ResultSet is
      * exhausted.
