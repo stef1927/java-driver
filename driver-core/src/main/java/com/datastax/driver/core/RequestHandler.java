@@ -149,10 +149,12 @@ class RequestHandler {
     }
 
     private void setFinalResult(SpeculativeExecution execution, Connection connection, Message.Response response) {
-        if (!isDone.compareAndSet(false, true)) {
-            if (logger.isTraceEnabled())
-                logger.trace("[{}] Got beaten to setting the result", execution.id);
-            return;
+        if (!response.isMultiPart()) {
+            if (!isDone.compareAndSet(false, true)) {
+                if (logger.isTraceEnabled())
+                    logger.trace("[{}] Got beaten to setting the result", execution.id);
+                return;
+            }
         }
 
         if (logger.isTraceEnabled())
@@ -451,11 +453,13 @@ class RequestHandler {
         @Override
         public void onSet(Connection connection, Message.Response response, long latency, int retryCount) {
             QueryState queryState = queryStateRef.get();
-            if (!queryState.isInProgressAt(retryCount) ||
-                    !queryStateRef.compareAndSet(queryState, queryState.complete())) {
-                logger.debug("onSet triggered but the response was completed by another thread, cancelling (retryCount = {}, queryState = {}, queryStateRef = {})",
-                        retryCount, queryState, queryStateRef.get());
-                return;
+            if (!response.isMultiPart()) {
+                if (!queryState.isInProgressAt(retryCount) ||
+                        !queryStateRef.compareAndSet(queryState, queryState.complete())) {
+                    logger.debug("onSet triggered but the response was completed by another thread, cancelling (retryCount = {}, queryState = {}, queryStateRef = {})",
+                            retryCount, queryState, queryStateRef.get());
+                    return;
+                }
             }
 
             Host queriedHost = current;
@@ -463,7 +467,8 @@ class RequestHandler {
             try {
                 switch (response.type) {
                     case RESULT:
-                        connection.release();
+                        if (!response.isMultiPart())
+                            connection.release();
                         setFinalResult(connection, response);
                         break;
                     case ERROR:

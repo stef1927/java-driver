@@ -55,5 +55,12 @@
         <className>com/datastax/driver/extras/codecs/jdk8/ZonedDateTimeCodec</className>
         <justification>This class is only present if the project was compiled with JDK 8+</justification>
     </difference>
+    
+    <!--7012: com.datastax.driver.core.Session: Method 'public java.util.Iterator streamAsync(com.datastax.driver.core.Statement)' has been added to an interface-->
+    <difference>
+        <className>com/datastax/driver/core/Session</className>
+        <differenceType>7012</differenceType>
+        <method>java.util.Iterator streamAsync(com.datastax.driver.core.Statement)</method>
+    </difference>
 
 </differences>

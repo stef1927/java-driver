@@ -20,6 +20,7 @@ import com.google.common.util.concurrent.ListenableFuture;
 
 import java.io.Closeable;
 import java.util.Collection;
+import java.util.Iterator;
 import java.util.Map;
 
 /**
@@ -243,6 +244,17 @@ public interface Session extends Closeable {
      *                                     values in RegularStatement.
      */
     ResultSetFuture executeAsync(Statement statement);
+
+
+    /**
+     * Executes the provided query asynchronously returning a stream of results.
+     *
+     * TODO: rename to stream() and return a ResultSet to which pages are added automatically.
+     *
+     * @param statement the CQL query to execute (that can be any {@code Statement}).
+     * @return a stream of futures containing the result of the query.
+     */
+    Iterator<ResultSetFuture> streamAsync(final Statement statement);
 
     /**
      * Prepares the provided query string.

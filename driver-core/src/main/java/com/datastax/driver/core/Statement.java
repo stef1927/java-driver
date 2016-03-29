@@ -62,6 +62,7 @@ public abstract class Statement {
     private volatile ConsistencyLevel consistency;
     private volatile ConsistencyLevel serialConsistency;
     private volatile boolean traceQuery;
+    private volatile boolean isStreaming;
     private volatile int fetchSize;
     private volatile long defaultTimestamp = Long.MIN_VALUE;
     private volatile int readTimeoutMillis = Integer.MIN_VALUE;
@@ -173,6 +174,31 @@ public abstract class Statement {
      */
     public boolean isTracing() {
         return traceQuery;
+    }
+
+
+    /**
+     * Request streaming of data. When querying partitions
+     * that are local to the host and with consistency level set to ONE,
+     * as typically done by analytics tools, the entire data set will be streamed
+     * in multiple responses. This will result in the callback being invoked multiple
+     * times without the need to fetch pages manually.
+     * @return this statement.
+     */
+    public Statement requestStreaming() {
+        isStreaming = true;
+        return this;
+    }
+
+    /**
+     * Return whether multi-part results should be streamed for this query or not.
+     * Currently only supported for select statements in limited cases, @see {@code }Select.requestStreaming}.
+     *
+     * @return {@code true} if streaming was requested for this statement, {@code false}
+     * otherwise.
+     */
+    public boolean isStreaming() {
+        return isStreaming;
     }
 
     /**
