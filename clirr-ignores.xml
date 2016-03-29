@@ -56,4 +56,22 @@
         <justification>This class is only present if the project was compiled with JDK 8+</justification>
     </difference>
 
+    <difference>
+        <className>com/datastax/driver/core/Session</className>
+        <differenceType>7012</differenceType> <!-- method added to interface -->
+        <method>com.datastax.driver.core.RowIterator execute(com.datastax.driver.core.Statement, com.datastax.driver.core.AsyncPagingOptions)</method>
+    </difference>
+
+    <difference>
+        <className>com/datastax/driver/core/Statement</className>
+        <differenceType>7012</differenceType> <!-- method added to class -->
+        <method>com.datastax.driver.core.TokenRange getRoutingTokenRange()</method>
+    </difference>
+
+    <difference>
+        <className>com/datastax/driver/core/Statement</className>
+        <differenceType>7012</differenceType> <!-- method added to class -->
+        <method>void setRoutingTokenRange(com.datastax.driver.core.TokenRange)</method>
+    </difference>
+
 </differences>

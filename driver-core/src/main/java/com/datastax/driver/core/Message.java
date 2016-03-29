@@ -26,6 +26,7 @@ import io.netty.util.AttributeKey;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.Closeable;
 import java.nio.ByteBuffer;
 import java.util.*;
 
@@ -90,7 +91,8 @@ abstract class Message {
             EXECUTE(10, Requests.Execute.coder),
             REGISTER(11, Requests.Register.coder),
             BATCH(13, Requests.Batch.coder),
-            AUTH_RESPONSE(15, Requests.AuthResponse.coder);
+            AUTH_RESPONSE(15, Requests.AuthResponse.coder),
+            CANCEL(17, Requests.Cancel.coder);
 
             final int opcode;
             final Coder<?> coder;
@@ -103,6 +105,7 @@ abstract class Message {
 
         final Type type;
         private final boolean tracingRequested;
+        private Host preferredHost;
 
         protected Request(Type type) {
             this(type, false);
@@ -180,6 +183,16 @@ abstract class Message {
             }
         }
 
+        public void setPreferredHost(Host host)
+        {
+            this.preferredHost = host;
+        }
+
+        public Host getPreferredHost()
+        {
+            return this.preferredHost;
+        }
+
         abstract Request copy();
 
         Request copy(ConsistencyLevel newConsistencyLevel) {
@@ -187,7 +200,7 @@ abstract class Message {
         }
     }
 
-    static abstract class Response extends Message {
+    static abstract class Response extends Message implements Closeable {
 
         enum Type {
             ERROR(0, Responses.Error.decoder),
@@ -251,6 +264,10 @@ abstract class Message {
         Response setWarnings(List<String> warnings) {
             this.warnings = warnings;
             return this;
+        }
+
+        public void close() {
+
         }
     }
 

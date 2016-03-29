@@ -83,6 +83,10 @@ class Connection {
     // Used by connection pooling to count how many requests are "in flight" on that connection.
     final AtomicInteger inFlight = new AtomicInteger(0);
 
+    // This indicates that the connection is temporarily reserved by a single callback that is
+    // receiving multiple messages from the server
+    final AtomicBoolean reserved = new AtomicBoolean(false);
+
     private final AtomicInteger writer = new AtomicInteger(0);
     private volatile String keyspace;
 
@@ -980,41 +984,46 @@ class Connection {
 
         @Override
         protected void channelRead0(ChannelHandlerContext ctx, Message.Response response) throws Exception {
-            int streamId = response.getStreamId();
+            try {
+                int streamId = response.getStreamId();
 
-            if (logger.isTraceEnabled())
-                logger.trace("{}, stream {}, received: {}", Connection.this, streamId, asDebugString(response));
+                if (logger.isTraceEnabled())
+                    logger.trace("{}, stream {}, received: {}", Connection.this, streamId, asDebugString(response));
 
-            if (streamId < 0) {
-                factory.defaultHandler.handle(response);
-                return;
+                if (streamId < 0) {
+                    factory.defaultHandler.handle(response);
+                    return;
+                }
+
+                ResponseHandler handler = pending.remove(streamId);
+                streamIdHandler.release(streamId);
+                if (handler == null) {
+                    /**
+                     * During normal operation, we should not receive responses for which we don't have a handler. There is
+                     * two cases however where this can happen:
+                     *   1) The connection has been defuncted due to some internal error and we've raced between removing the
+                     *      handler and actually closing the connection; since the original error has been logged, we're fine
+                     *      ignoring this completely.
+                     *   2) This request has timed out. In that case, we've already switched to another host (or errred out
+                     *      to the user). So log it for debugging purpose, but it's fine ignoring otherwise.
+                     */
+                    streamIdHandler.unmark(streamId);
+                    if (logger.isDebugEnabled())
+                        logger.debug("{} Response received on stream {} but no handler set anymore (either the request has "
+                                + "timed out or it was closed due to another error). Received message is {}", Connection.this, streamId, asDebugString(response));
+                    return;
+                }
+                handler.cancelTimeout();
+                handler.callback.onSet(Connection.this, response, System.nanoTime() - handler.startTime, handler.retryCount);
+
+                // If we happen to be closed and we're the last outstanding request, we need to terminate the connection
+                // (note: this is racy as the signaling can be called more than once, but that's not a problem)
+                if (isClosed())
+                    tryTerminate(false);
             }
-
-            ResponseHandler handler = pending.remove(streamId);
-            streamIdHandler.release(streamId);
-            if (handler == null) {
-                /**
-                 * During normal operation, we should not receive responses for which we don't have a handler. There is
-                 * two cases however where this can happen:
-                 *   1) The connection has been defuncted due to some internal error and we've raced between removing the
-                 *      handler and actually closing the connection; since the original error has been logged, we're fine
-                 *      ignoring this completely.
-                 *   2) This request has timed out. In that case, we've already switched to another host (or errored out
-                 *      to the user). So log it for debugging purpose, but it's fine ignoring otherwise.
-                 */
-                streamIdHandler.unmark(streamId);
-                if (logger.isDebugEnabled())
-                    logger.debug("{} Response received on stream {} but no handler set anymore (either the request has "
-                            + "timed out or it was closed due to another error). Received message is {}", Connection.this, streamId, asDebugString(response));
-                return;
+            finally {
+                response.close();
             }
-            handler.cancelTimeout();
-            handler.callback.onSet(Connection.this, response, System.nanoTime() - handler.startTime, handler.retryCount);
-
-            // If we happen to be closed and we're the last outstanding request, we need to terminate the connection
-            // (note: this is racy as the signaling can be called more than once, but that's not a problem)
-            if (isClosed())
-                tryTerminate(false);
         }
 
         @Override

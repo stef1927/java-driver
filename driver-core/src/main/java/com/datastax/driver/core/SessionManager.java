@@ -16,10 +16,7 @@
 package com.datastax.driver.core;
 
 import com.datastax.driver.core.Message.Response;
-import com.datastax.driver.core.exceptions.DriverInternalError;
-import com.datastax.driver.core.exceptions.InvalidQueryException;
-import com.datastax.driver.core.exceptions.UnsupportedFeatureException;
-import com.datastax.driver.core.exceptions.UnsupportedProtocolVersionException;
+import com.datastax.driver.core.exceptions.*;
 import com.datastax.driver.core.policies.LoadBalancingPolicy;
 import com.datastax.driver.core.policies.ReconnectionPolicy;
 import com.datastax.driver.core.policies.SpeculativeExecutionPolicy;
@@ -35,10 +32,7 @@ import org.slf4j.LoggerFactory;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -150,6 +144,28 @@ class SessionManager extends AbstractSession {
             }, executor());
             return chainedFuture;
         }
+    }
+
+    @Override
+    public RowIterator execute(final Statement statement, final AsyncPagingOptions pagingOptions)
+    {
+        final RowIteratorImpl.PageQueue queue = new RowIteratorImpl.PageQueue(statement, this);
+        final AsyncRequestHandlerCallback cb = new AsyncRequestHandlerCallback(queue, cluster.manager,
+                makeRequestMessage(statement, null, pagingOptions), pagingOptions);
+
+        if (isInit) {
+            cb.sendRequest();
+        }
+        else {
+            this.initAsync().addListener(new Runnable() {
+                @Override
+                public void run() {
+                    cb.sendRequest();
+                }
+            }, executor());
+        }
+
+        return new RowIteratorImpl(cb, queue);
     }
 
     @Override
@@ -488,6 +504,11 @@ class SessionManager extends AbstractSession {
     }
 
     Message.Request makeRequestMessage(Statement statement, ByteBuffer pagingState) {
+        return makeRequestMessage(statement, pagingState, AsyncPagingOptions.NO_PAGING);
+    }
+
+    Message.Request makeRequestMessage(Statement statement, ByteBuffer pagingState, AsyncPagingOptions asyncPagingOptions)
+    {
         // We need the protocol version, which is only available once the cluster has initialized. Initialize the session to ensure this is the case.
         // init() locks, so avoid if we know we don't need it.
         if (!isInit)
@@ -566,8 +587,9 @@ class SessionManager extends AbstractSession {
 
             String qString = rs.getQueryString();
 
-            Requests.QueryProtocolOptions options = new Requests.QueryProtocolOptions(Message.Request.Type.QUERY, consistency, positionalValues, namedValues,
-                    false, fetchSize, usedPagingState, serialConsistency, defaultTimestamp);
+            Requests.QueryProtocolOptions options = new Requests.QueryProtocolOptions(Message.Request.Type.QUERY,
+                    consistency, positionalValues, namedValues, false, fetchSize, usedPagingState, serialConsistency,
+                    defaultTimestamp, asyncPagingOptions);
             request = new Requests.Query(qString, options, statement.isTracing());
         } else if (statement instanceof BoundStatement) {
             BoundStatement bs = (BoundStatement) statement;
@@ -578,8 +600,9 @@ class SessionManager extends AbstractSession {
             if (protocolVersion.compareTo(ProtocolVersion.V4) < 0)
                 bs.ensureAllSet();
             boolean skipMetadata = protocolVersion != ProtocolVersion.V1 && bs.statement.getPreparedId().resultSetMetadata != null;
-            Requests.QueryProtocolOptions options = new Requests.QueryProtocolOptions(Message.Request.Type.EXECUTE, consistency, Arrays.asList(bs.wrapper.values), Collections.<String, ByteBuffer>emptyMap(),
-                    skipMetadata, fetchSize, usedPagingState, serialConsistency, defaultTimestamp);
+            Requests.QueryProtocolOptions options = new Requests.QueryProtocolOptions(Message.Request.Type.EXECUTE,
+                    consistency, Arrays.asList(bs.wrapper.values), Collections.<String, ByteBuffer>emptyMap(), skipMetadata, fetchSize,
+                    usedPagingState, serialConsistency, defaultTimestamp, asyncPagingOptions);
             request = new Requests.Execute(bs.statement.getPreparedId().id, options, statement.isTracing());
         } else {
             assert statement instanceof BatchStatement : statement;

@@ -82,8 +82,8 @@ abstract class ArrayBackedResultSet implements ResultSet {
                 assert r.metadata.pagingState == null || info != null;
 
                 return r.metadata.pagingState == null
-                        ? new SinglePage(columnDefs, tokenFactory, protocolVersion, columnDefs.codecRegistry, r.data, info)
-                        : new MultiPage(columnDefs, tokenFactory, protocolVersion, columnDefs.codecRegistry, r.data, info, r.metadata.pagingState, session);
+                        ? new SinglePage(columnDefs, tokenFactory, protocolVersion, columnDefs.codecRegistry, r.rows(), info)
+                        : new MultiPage(columnDefs, tokenFactory, protocolVersion, columnDefs.codecRegistry, r.rows(), info, r.metadata.pagingState, session);
 
             case VOID:
             case SET_KEYSPACE:
@@ -361,7 +361,7 @@ abstract class ArrayBackedResultSet implements ResultSet {
                                 if (rm.kind == Responses.Result.Kind.ROWS) {
                                     Responses.Result.Rows rows = (Responses.Result.Rows) rm;
                                     info = update(info, rm, MultiPage.this.session, rows.metadata.pagingState, protocolVersion, codecRegistry, statement);
-                                    MultiPage.this.nextPages.offer(rows.data);
+                                    MultiPage.this.nextPages.offer(rows.rows());
                                     MultiPage.this.fetchState = rows.metadata.pagingState == null ? null : new FetchingState(rows.metadata.pagingState, null);
                                 } else if (rm.kind == Responses.Result.Kind.VOID) {
                                     // We shouldn't really get a VOID message here but well, no harm in handling it I suppose

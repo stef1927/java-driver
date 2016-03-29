@@ -69,6 +69,7 @@ public abstract class Statement {
     private volatile ByteBuffer pagingState;
     protected volatile Boolean idempotent;
     private volatile Map<String, ByteBuffer> outgoingPayload;
+    private TokenRange tokenRange;
 
     // We don't want to expose the constructor, because the code relies on this being only sub-classed by RegularStatement, BoundStatement and BatchStatement
     Statement() {
@@ -196,6 +197,26 @@ public abstract class Statement {
      * @return the routing key for this query or {@code null}.
      */
     public abstract ByteBuffer getRoutingKey(ProtocolVersion protocolVersion, CodecRegistry codecRegistry);
+
+    /**
+     * Returns the routing token, which is just like the routing key defined above excpet that
+     * is has already been hashed.
+     *
+     * @return an optional routing token for this statement or {@code null}
+     */
+    public TokenRange getRoutingTokenRange()
+    {
+        return tokenRange;
+    }
+
+    /**
+     * Set a routing token for this statement. Load balancing policies may use this token to determine
+     * which replicas to send the query to.
+    */
+    public void setRoutingTokenRange(TokenRange tokenRange)
+    {
+        this.tokenRange = tokenRange;
+    }
 
     /**
      * Returns the keyspace this query operates on.

@@ -20,10 +20,7 @@ import com.google.common.collect.ImmutableMap;
 import io.netty.buffer.ByteBuf;
 
 import java.nio.ByteBuffer;
-import java.util.Collections;
-import java.util.EnumSet;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 class Requests {
 
@@ -218,6 +215,21 @@ class Requests {
         }
     }
 
+    static <E extends Enum<E>> EnumSet<E> deserializeFlags(int flags, E[] values, EnumSet<E> set) {
+        for (int n = 0; n < values.length; n++) {
+            if ((flags & (1 << n)) != 0)
+                set.add(values[n]);
+        }
+        return set;
+    }
+
+    static <E extends Enum<E>> int serializeFlags(EnumSet<E> flags) {
+        int i = 0;
+        for (E flag : flags)
+            i |= 1 << flag.ordinal();
+        return i;
+    }
+
     enum QueryFlag {
         // The order of that enum matters!!
         VALUES,
@@ -226,23 +238,28 @@ class Requests {
         PAGING_STATE,
         SERIAL_CONSISTENCY,
         DEFAULT_TIMESTAMP,
-        VALUE_NAMES;
+        VALUE_NAMES,
+        EXTENDED_FLAGS;
 
         static EnumSet<QueryFlag> deserialize(int flags) {
-            EnumSet<QueryFlag> set = EnumSet.noneOf(QueryFlag.class);
-            QueryFlag[] values = QueryFlag.values();
-            for (int n = 0; n < values.length; n++) {
-                if ((flags & (1 << n)) != 0)
-                    set.add(values[n]);
-            }
-            return set;
+            return deserializeFlags(flags, QueryFlag.values(), EnumSet.noneOf(QueryFlag.class));
         }
 
         static int serialize(EnumSet<QueryFlag> flags) {
-            int i = 0;
-            for (QueryFlag flag : flags)
-                i |= 1 << flag.ordinal();
-            return i;
+            return serializeFlags(flags);
+        }
+    }
+
+    enum ExtendedQueryFlag {
+        // The order of that enum matters!!
+        WITH_ASYNC_PAGING;
+
+        static EnumSet<ExtendedQueryFlag> deserialize(int flags) {
+            return deserializeFlags(flags, ExtendedQueryFlag.values(), EnumSet.noneOf(ExtendedQueryFlag.class));
+        }
+
+        static int serialize(EnumSet<ExtendedQueryFlag> flags) {
+            return serializeFlags(flags);
         }
     }
 
@@ -256,9 +273,12 @@ class Requests {
                 false,
                 -1,
                 null,
-                ConsistencyLevel.SERIAL, Long.MIN_VALUE);
+                ConsistencyLevel.SERIAL,
+                Long.MIN_VALUE,
+                AsyncPagingOptions.NO_PAGING);
 
         private final EnumSet<QueryFlag> flags = EnumSet.noneOf(QueryFlag.class);
+        private final EnumSet<ExtendedQueryFlag> extendedFlags = EnumSet.noneOf(ExtendedQueryFlag.class);
         private final Message.Request.Type requestType;
         final ConsistencyLevel consistency;
         final List<ByteBuffer> positionalValues;
@@ -268,6 +288,7 @@ class Requests {
         final ByteBuffer pagingState;
         final ConsistencyLevel serialConsistency;
         final long defaultTimestamp;
+        final AsyncPagingOptions asyncPagingOptions;
 
         QueryProtocolOptions(Message.Request.Type requestType,
                              ConsistencyLevel consistency,
@@ -277,7 +298,8 @@ class Requests {
                              int pageSize,
                              ByteBuffer pagingState,
                              ConsistencyLevel serialConsistency,
-                             long defaultTimestamp) {
+                             long defaultTimestamp,
+                             AsyncPagingOptions asyncPagingOptions) {
 
             Preconditions.checkArgument(positionalValues.isEmpty() || namedValues.isEmpty());
 
@@ -290,6 +312,7 @@ class Requests {
             this.pagingState = pagingState;
             this.serialConsistency = serialConsistency;
             this.defaultTimestamp = defaultTimestamp;
+            this.asyncPagingOptions = asyncPagingOptions;
 
             // Populate flags
             if (!positionalValues.isEmpty())
@@ -308,10 +331,15 @@ class Requests {
                 flags.add(QueryFlag.SERIAL_CONSISTENCY);
             if (defaultTimestamp != Long.MIN_VALUE)
                 flags.add(QueryFlag.DEFAULT_TIMESTAMP);
+            if (asyncPagingOptions.enabled()) {
+                flags.add(QueryFlag.EXTENDED_FLAGS);
+                extendedFlags.add(ExtendedQueryFlag.WITH_ASYNC_PAGING);
+            }
         }
 
         QueryProtocolOptions copy(ConsistencyLevel newConsistencyLevel) {
-            return new QueryProtocolOptions(requestType, newConsistencyLevel, positionalValues, namedValues, skipMetadata, pageSize, pagingState, serialConsistency, defaultTimestamp);
+            return new QueryProtocolOptions(requestType, newConsistencyLevel, positionalValues, namedValues,
+                    skipMetadata, pageSize, pagingState, serialConsistency, defaultTimestamp, asyncPagingOptions);
         }
 
         void encode(ByteBuf dest, ProtocolVersion version) {
@@ -328,6 +356,8 @@ class Requests {
                 case V4:
                     CBUtil.writeConsistencyLevel(consistency, dest);
                     dest.writeByte((byte) QueryFlag.serialize(flags));
+                    if (flags.contains(QueryFlag.EXTENDED_FLAGS))
+                        dest.writeByte((byte) ExtendedQueryFlag.serialize(extendedFlags));
                     if (flags.contains(QueryFlag.VALUES)) {
                         if (flags.contains(QueryFlag.VALUE_NAMES)) {
                             assert version.compareTo(ProtocolVersion.V3) >= 0;
@@ -344,6 +374,9 @@ class Requests {
                         CBUtil.writeConsistencyLevel(serialConsistency, dest);
                     if (version.compareTo(ProtocolVersion.V3) >= 0 && flags.contains(QueryFlag.DEFAULT_TIMESTAMP))
                         dest.writeLong(defaultTimestamp);
+                    if (version.compareTo(ProtocolVersion.V4) >= 0 && extendedFlags.contains(ExtendedQueryFlag.WITH_ASYNC_PAGING))
+                        encode(asyncPagingOptions, dest);
+
                     break;
                 default:
                     throw version.unsupported();
@@ -363,6 +396,8 @@ class Requests {
                     int size = 0;
                     size += CBUtil.sizeOfConsistencyLevel(consistency);
                     size += 1; // flags
+                    if (flags.contains(QueryFlag.EXTENDED_FLAGS))
+                        size += 1; //extended flags
                     if (flags.contains(QueryFlag.VALUES)) {
                         if (flags.contains(QueryFlag.VALUE_NAMES)) {
                             assert version.compareTo(ProtocolVersion.V3) >= 0;
@@ -379,16 +414,30 @@ class Requests {
                         size += CBUtil.sizeOfConsistencyLevel(serialConsistency);
                     if (version == ProtocolVersion.V3 && flags.contains(QueryFlag.DEFAULT_TIMESTAMP))
                         size += 8;
+                    if (version.compareTo(ProtocolVersion.V4) >= 0 && extendedFlags.contains(ExtendedQueryFlag.WITH_ASYNC_PAGING))
+                        size += encodedSize(asyncPagingOptions);
                     return size;
                 default:
                     throw version.unsupported();
             }
         }
 
+        private void encode(AsyncPagingOptions options, ByteBuf dest) {
+            CBUtil.writeUUID(options.id, dest);
+            dest.writeInt(options.pageSize);
+            dest.writeInt(options.pageUnit.id);
+            dest.writeInt(options.maxPages);
+            dest.writeInt(options.maxPagesPerSecond);
+        }
+
+        private int encodedSize(AsyncPagingOptions options) {
+            return CBUtil.sizeOfUUID(options.id) + 16;
+        }
+
         @Override
         public String toString() {
-            return String.format("[cl=%s, positionalVals=%s, namedVals=%s, skip=%b, psize=%d, state=%s, serialCl=%s]",
-                    consistency, positionalValues, namedValues, skipMetadata, pageSize, pagingState, serialConsistency);
+            return String.format("[cl=%s, positionalVals=%s, namedVals=%s, skip=%b, psize=%d, state=%s, serialCl=%s, asyncPagingOptions=%s]",
+                    consistency, positionalValues, namedValues, skipMetadata, pageSize, pagingState, serialConsistency, asyncPagingOptions);
         }
     }
 
@@ -643,6 +692,53 @@ class Requests {
         @Override
         Request copy() {
             return new AuthResponse(token);
+        }
+    }
+
+    static class Cancel extends Message.Request {
+
+        public enum OperationType
+        {
+            ASYNC_PAGING(1);
+
+            private final int id;
+            OperationType(int id)
+            {
+                this.id = id;
+            }
+        }
+
+        static final Message.Coder<Cancel> coder = new Message.Coder<Cancel>() {
+
+            @Override
+            public void encode(Cancel msg, ByteBuf dest, ProtocolVersion version) {
+                dest.writeInt(msg.operationType.id);
+                CBUtil.writeUUID(msg.uuid, dest);
+            }
+
+            @Override
+            public int encodedSize(Cancel msg, ProtocolVersion version) {
+                return 4 + CBUtil.sizeOfUUID(msg.uuid);
+            }
+        };
+
+        private final OperationType operationType;
+        private final UUID uuid;
+
+        Cancel(OperationType operationType, UUID uuid) {
+            super(Type.CANCEL);
+            this.operationType = operationType;
+            this.uuid = uuid;
+        }
+
+        @Override
+        Request copy() {
+            return new Cancel(operationType, uuid);
+        }
+
+        public static Cancel asyncPaging(UUID uuid)
+        {
+            return new Cancel(OperationType.ASYNC_PAGING, uuid);
         }
     }
 }

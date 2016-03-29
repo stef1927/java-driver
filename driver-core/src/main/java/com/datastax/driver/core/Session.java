@@ -245,6 +245,17 @@ public interface Session extends Closeable {
     ResultSetFuture executeAsync(Statement statement);
 
     /**
+     * Executes the provided query returning an iterator of rows, paging is done internally and possibly
+     * by keeping a session open server side.
+     *
+     * @param statement the CQL query to execute (that can be any {@code Statement}).
+     * @param pagingOptions options that specify number of pages to retrieve, paging size, paging rate, etc
+     *
+     * @return an iterator of rows that must be closed when finished, see {@link RowIterator}
+     */
+    RowIterator execute(Statement statement, AsyncPagingOptions pagingOptions);
+
+    /**
      * Prepares the provided query string.
      *
      * @param query the CQL query string to prepare

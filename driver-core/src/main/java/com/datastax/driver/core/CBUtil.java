@@ -289,8 +289,14 @@ abstract class CBUtil { // TODO rename
         int length = cb.readInt();
         if (length < 0)
             return null;
-        ByteBuf slice = cb.readSlice(length);
 
+        if (!cb.hasArray()) { //avoids creating the slice
+            byte[] bytes = new byte[length];
+            cb.readBytes(bytes);
+            return ByteBuffer.wrap(bytes);
+        }
+
+        ByteBuf slice = cb.readSlice(length);
         return ByteBuffer.wrap(readRawBytes(slice));
     }
 

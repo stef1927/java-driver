@@ -50,6 +50,13 @@ class HostConnectionPool implements Connection.Owner {
     protected final SessionManager manager;
 
     final List<Connection> connections;
+    /**
+     * The connections that are reserved for a specific callback, see {@link AsyncRequestHandlerCallback}.
+     * We need to put an upper bound for reserved connections, this was not done during the development of
+     * CASSANDRA-11521. I would simply fail the request if this upper bound is exceeded since there shouldn't
+     * be too many async requests session on going due to the usage of resources server and client side.
+     */
+    final ConcurrentLinkedQueue<Connection> reservedConnections;
     private final AtomicInteger open;
     /**
      * The total number of in-flight requests on all connections of this pool.
@@ -96,6 +103,7 @@ class HostConnectionPool implements Connection.Owner {
         };
 
         this.connections = new CopyOnWriteArrayList<Connection>();
+        this.reservedConnections = new ConcurrentLinkedQueue<Connection>();
         this.open = new AtomicInteger();
 
         this.minAllowedStreams = options().getMaxRequestsPerConnection(hostDistance) * 3 / 4;
@@ -194,6 +202,32 @@ class HostConnectionPool implements Connection.Owner {
 
     private PoolingOptions options() {
         return manager.configuration().getPoolingOptions();
+    }
+
+    public Connection reserveConnection() throws ConnectionException {
+        Phase phase = this.phase.get();
+        if (phase != Phase.READY)
+            // Note: throwing a ConnectionException is probably fine in practice as it will trigger the creation of a new host.
+            // That being said, maybe having a specific exception could be cleaner.
+            throw new ConnectionException(host.getSocketAddress(), "Pool is " + phase);
+
+        Connection ret = reservedConnections.poll();
+        if (ret != null) {
+            if (logger.isTraceEnabled())
+                logger.trace("Returning previously reserved connection for {}", host);
+            return ret;
+        }
+
+        try {
+            if (logger.isTraceEnabled())
+                logger.trace("Creating new reserved connection for {}", host);
+            ret = manager.connectionFactory().open(this);
+            ret.reserved.compareAndSet(false, true);
+            return ret;
+        }
+        catch (Exception ex) {
+            throw new ConnectionException(host.getSocketAddress(), "Failed to create connection", ex);
+        }
     }
 
     public Connection borrowConnection(long timeout, TimeUnit unit) throws ConnectionException, TimeoutException {
@@ -366,8 +400,10 @@ class HostConnectionPool implements Connection.Owner {
     }
 
     public void returnConnection(Connection connection) {
-        connection.inFlight.decrementAndGet();
-        totalInFlight.decrementAndGet();
+        if (!connection.reserved.get()) {
+            connection.inFlight.decrementAndGet();
+            totalInFlight.decrementAndGet();
+        }
 
         if (isClosed()) {
             close(connection);
@@ -381,7 +417,10 @@ class HostConnectionPool implements Connection.Owner {
         }
 
         if (connection.state.get() != TRASHED) {
-            if (connection.maxAvailableStreams() < minAllowedStreams) {
+            if (connection.reserved.get()) {
+                reservedConnections.offer(connection);
+            }
+            else if (connection.maxAvailableStreams() < minAllowedStreams) {
                 replaceConnection(connection);
             } else {
                 signalAvailableConnection();
@@ -646,6 +685,10 @@ class HostConnectionPool implements Connection.Owner {
                 }
             }, MoreExecutors.sameThreadExecutor());
             futures.add(future);
+        }
+
+        for (final Connection connection : reservedConnections) {
+            futures.add(connection.closeAsync());
         }
 
         // Some connections in the trash might still be open if they hadn't reached their idle timeout

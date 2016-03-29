@@ -18,8 +18,9 @@ package com.datastax.driver.core;
 import com.datastax.driver.core.Responses.Result.Rows.Metadata;
 import com.datastax.driver.core.exceptions.*;
 import com.datastax.driver.core.utils.Bytes;
-import io.netty.buffer.ByteBuf;
+import io.netty.buffer.*;
 
+import java.io.Closeable;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.util.*;
@@ -329,13 +330,16 @@ class Responses {
 
         static class Rows extends Result {
 
+            static final Rows EMPTY = new Rows(Metadata.EMPTY, 0, Unpooled.EMPTY_BUFFER, ProtocolVersion.NEWEST_SUPPORTED);
+
             static class Metadata {
 
                 private enum Flag {
                     // The order of that enum matters!!
                     GLOBAL_TABLES_SPEC,
                     HAS_MORE_PAGES,
-                    NO_METADATA;
+                    NO_METADATA,
+                    WITH_ASYNC_PAGING;
 
                     static EnumSet<Flag> deserialize(int flags) {
                         EnumSet<Flag> set = EnumSet.noneOf(Flag.class);
@@ -355,18 +359,20 @@ class Responses {
                     }
                 }
 
-                static final Metadata EMPTY = new Metadata(0, null, null, null);
+                static final Metadata EMPTY = new Metadata(0, null, null, null, AsyncPagingParams.NONE);
 
                 final int columnCount;
                 final ColumnDefinitions columns; // Can be null if no metadata was asked by the query
                 final ByteBuffer pagingState;
                 final int[] pkIndices;
+                final AsyncPagingParams asyncPagingParams;
 
-                private Metadata(int columnCount, ColumnDefinitions columns, ByteBuffer pagingState, int[] pkIndices) {
+                private Metadata(int columnCount, ColumnDefinitions columns, ByteBuffer pagingState, int[] pkIndices, AsyncPagingParams asyncPagingParams) {
                     this.columnCount = columnCount;
                     this.columns = columns;
                     this.pagingState = pagingState;
                     this.pkIndices = pkIndices;
+                    this.asyncPagingParams = asyncPagingParams;
                 }
 
                 static Metadata decode(ByteBuf body, ProtocolVersion protocolVersion, CodecRegistry codecRegistry) {
@@ -392,7 +398,7 @@ class Responses {
                         state = CBUtil.readValue(body);
 
                     if (flags.contains(Flag.NO_METADATA))
-                        return new Metadata(columnCount, null, state, pkIndices);
+                        return new Metadata(columnCount, null, state, pkIndices, asyncPagingParams(flags, body, protocolVersion));
 
                     boolean globalTablesSpec = flags.contains(Flag.GLOBAL_TABLES_SPEC);
 
@@ -413,7 +419,12 @@ class Responses {
                         defs[i] = new ColumnDefinitions.Definition(ksName, cfName, name, type);
                     }
 
-                    return new Metadata(columnCount, new ColumnDefinitions(defs, codecRegistry), state, pkIndices);
+                    return new Metadata(columnCount, new ColumnDefinitions(defs, codecRegistry), state, pkIndices,
+                            asyncPagingParams(flags, body, protocolVersion));
+                }
+
+                static AsyncPagingParams asyncPagingParams(EnumSet<Flag> flags, ByteBuf body, ProtocolVersion protocolVersion) {
+                    return flags.contains(Flag.WITH_ASYNC_PAGING) ? AsyncPagingParams.decode(body, protocolVersion) : AsyncPagingParams.NONE;
                 }
 
                 @Override
@@ -434,6 +445,38 @@ class Responses {
                 }
             }
 
+            static class AsyncPagingParams
+            {
+                private static final UUID NO_ASYNC_PAGING = new UUID(0, 0);
+                public static AsyncPagingParams NONE = new AsyncPagingParams(NO_ASYNC_PAGING, -1, false);
+
+                final UUID uuid;
+                final int seqNo;
+                final boolean last;
+
+                AsyncPagingParams(UUID uuid, int seqNo, boolean last)
+                {
+                    this.uuid = uuid;
+                    this.seqNo = seqNo;
+                    this.last = last;
+                }
+
+                static AsyncPagingParams decode(ByteBuf body, ProtocolVersion protocolVersion)
+                {
+                    return new AsyncPagingParams(CBUtil.readUUID(body), body.readInt(), body.readBoolean());
+                }
+
+                @Override
+                public String toString()
+                {
+                    return String.format("%s - no. %d%s", uuid, seqNo, last ? " final" : "");
+                }
+
+                boolean dataAvailable() {
+                    return !uuid.equals(NO_ASYNC_PAGING);
+                }
+            }
+
             static final Message.Decoder<Result> subcodec = new Message.Decoder<Result>() {
                 @Override
                 public Result decode(ByteBuf body, ProtocolVersion version, CodecRegistry codecRegistry) {
@@ -441,61 +484,145 @@ class Responses {
                     Metadata metadata = Metadata.decode(body, version, codecRegistry);
 
                     int rowCount = body.readInt();
-                    int columnCount = metadata.columnCount;
-
-                    Queue<List<ByteBuffer>> data = new ArrayDeque<List<ByteBuffer>>(rowCount);
-                    for (int i = 0; i < rowCount; i++) {
-                        List<ByteBuffer> row = new ArrayList<ByteBuffer>(columnCount);
-                        for (int j = 0; j < columnCount; j++)
-                            row.add(CBUtil.readValue(body));
-                        data.add(row);
-                    }
-
-                    return new Rows(metadata, data, version);
+                    ByteBuf data = body.slice();
+                    return new Rows(metadata, rowCount, data, version);
                 }
             };
 
+            static final class RowIterator implements Iterator<List<ByteBuffer>>, Closeable
+            {
+                private final int rowCount;
+                private final int columnCount;
+                private final ByteBuf data;
+                private int current;
+
+                RowIterator(Rows parent)
+                {
+                    this.rowCount = parent.rowCount;
+                    this.columnCount = parent.metadata.columnCount;
+                    this.data = parent.data.duplicate().retain();
+                    this.current = 0;
+                }
+
+                @Override
+                public boolean hasNext() {
+                    return remaining() > 0;
+                }
+
+                @Override
+                public List<ByteBuffer> next() {
+                    if (current == rowCount)
+                        return null;
+
+                    List<ByteBuffer> ret = new ArrayList<ByteBuffer>(columnCount);
+                    for (int j = 0; j < columnCount; j++)
+                        ret.add(CBUtil.readValue(data));
+
+                    current++;
+                    return ret;
+                }
+
+                public List<ByteBuffer> one()
+                {
+                    return hasNext() ? next() : null;
+                }
+
+                public int remaining()
+                {
+                    return rowCount - current;
+                }
+
+                public boolean isEmpty()
+                {
+                    return !hasNext();
+                }
+
+                @Override
+                public void remove() {
+                    throw new UnsupportedOperationException("remove");
+                }
+
+                public void close()
+                {
+                    data.release();
+                }
+            }
+
             final Metadata metadata;
-            final Queue<List<ByteBuffer>> data;
+            final ByteBuf data;
+            final int rowCount;
             private final ProtocolVersion version;
 
-            private Rows(Metadata metadata, Queue<List<ByteBuffer>> data, ProtocolVersion version) {
+            private Rows(Metadata metadata, int rowCount, ByteBuf data, ProtocolVersion version) {
                 super(Kind.ROWS);
                 this.metadata = metadata;
-                this.data = data;
+                this.rowCount = rowCount;
+                this.data = data.retain();
                 this.version = version;
+            }
+
+            RowIterator rowIterator()
+            {
+               return new RowIterator(this);
+            }
+
+            Queue<List<ByteBuffer>> rows()
+            {
+                RowIterator it = new RowIterator(this);
+                try {
+                    Queue<List<ByteBuffer>> data = new ArrayDeque<List<ByteBuffer>>(rowCount);
+                    while(it.hasNext())
+                        data.add(it.next());
+                    return data;
+                }
+                finally {
+                    it.close();
+                }
             }
 
             @Override
             public String toString() {
                 StringBuilder sb = new StringBuilder();
                 sb.append("ROWS ").append(metadata).append('\n');
-                for (List<ByteBuffer> row : data) {
-                    for (int i = 0; i < row.size(); i++) {
-                        ByteBuffer v = row.get(i);
-                        if (v == null) {
-                            sb.append(" | null");
-                        } else {
-                            sb.append(" | ");
-                            if (metadata.columns != null) {
-                                DataType dataType = metadata.columns.getType(i);
-                                sb.append(dataType);
-                                sb.append(" ");
-                                TypeCodec<Object> codec = metadata.columns.codecRegistry.codecFor(dataType);
-                                Object o = codec.deserialize(v, version);
-                                String s = codec.format(o);
-                                if (s.length() > 100)
-                                    s = s.substring(0, 100) + "...";
-                                sb.append(s);
+                RowIterator it = rowIterator();
+                try{
+                    while (it.hasNext()) {
+                        List<ByteBuffer> row = it.next();
+                        for (int i = 0; i < row.size(); i++) {
+                            ByteBuffer v = row.get(i);
+                            if (v == null) {
+                                sb.append(" | null");
                             } else {
-                                sb.append(Bytes.toHexString(v));
+                                sb.append(" | ");
+                                if (metadata.columns != null) {
+                                    DataType dataType = metadata.columns.getType(i);
+                                    sb.append(dataType);
+                                    sb.append(" ");
+                                    TypeCodec<Object> codec = metadata.columns.codecRegistry.codecFor(dataType);
+                                    Object o = codec.deserialize(v, version);
+                                    String s = codec.format(o);
+                                    if (s.length() > 100)
+                                        s = s.substring(0, 100) + "...";
+                                    sb.append(s);
+                                } else {
+                                    sb.append(Bytes.toHexString(v));
+                                }
                             }
                         }
+                        sb.append('\n');
                     }
-                    sb.append('\n');
+                }
+                finally {
+                    it.close();
                 }
                 sb.append("---");
                 return sb.toString();
+            }
+
+            @Override
+            public void close()
+            {
+                data.release();
             }
         }
 
