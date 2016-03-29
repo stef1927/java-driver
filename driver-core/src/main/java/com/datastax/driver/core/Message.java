@@ -103,14 +103,20 @@ abstract class Message {
 
         final Type type;
         private final boolean tracingRequested;
+        private final boolean streamingRequested;
 
         protected Request(Type type) {
             this(type, false);
         }
 
         protected Request(Type type, boolean tracingRequested) {
+            this(type, tracingRequested, false);
+        }
+
+        protected Request(Type type, boolean tracingRequested, boolean streamingRequested) {
             this.type = type;
             this.tracingRequested = tracingRequested;
+            this.streamingRequested = streamingRequested;
         }
 
         @Override
@@ -129,6 +135,8 @@ abstract class Message {
         boolean isTracingRequested() {
             return tracingRequested;
         }
+
+        boolean isStreamingRequested() { return streamingRequested; }
 
         ConsistencyLevel consistency() {
             switch (this.type) {
@@ -234,6 +242,7 @@ abstract class Message {
         final Type type;
         protected volatile UUID tracingId;
         protected volatile List<String> warnings;
+        protected volatile boolean isMultiPart;
 
         protected Response(Type type) {
             this.type = type;
@@ -252,6 +261,16 @@ abstract class Message {
             this.warnings = warnings;
             return this;
         }
+
+        Response setMultiPart(boolean val) {
+            this.isMultiPart = val;
+            return this;
+        }
+
+        boolean isMultiPart()
+        {
+            return isMultiPart;
+        }
     }
 
     @ChannelHandler.Sharable
@@ -263,6 +282,7 @@ abstract class Message {
             boolean isCustomPayload = frame.header.flags.contains(Frame.Header.Flag.CUSTOM_PAYLOAD);
             UUID tracingId = isTracing ? CBUtil.readUUID(frame.body) : null;
             Map<String, ByteBuffer> customPayload = isCustomPayload ? CBUtil.readBytesMap(frame.body) : null;
+            boolean isMultiPart = frame.header.flags.contains(Frame.Header.Flag.MULTI_PART);
 
             if (customPayload != null && logger.isTraceEnabled()) {
                 logger.trace("Received payload: {} ({} bytes total)", printPayload(customPayload), CBUtil.sizeOfBytesMap(customPayload));
@@ -278,6 +298,7 @@ abstract class Message {
                 response
                         .setTracingId(tracingId)
                         .setWarnings(warnings)
+                        .setMultiPart(isMultiPart)
                         .setCustomPayload(customPayload)
                         .setStreamId(frame.header.streamId);
                 out.add(response);
@@ -302,6 +323,8 @@ abstract class Message {
             EnumSet<Frame.Header.Flag> flags = EnumSet.noneOf(Frame.Header.Flag.class);
             if (request.isTracingRequested())
                 flags.add(Frame.Header.Flag.TRACING);
+            if (request.isStreamingRequested())
+                flags.add(Frame.Header.Flag.MULTI_PART);
             Map<String, ByteBuffer> customPayload = request.getCustomPayload();
             if (customPayload != null) {
                 if (protocolVersion.compareTo(ProtocolVersion.V4) < 0)

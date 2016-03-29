@@ -990,8 +990,15 @@ class Connection {
                 return;
             }
 
-            ResponseHandler handler = pending.remove(streamId);
-            streamIdHandler.release(streamId);
+            ResponseHandler handler;
+            if (response.isMultiPart()) {
+                handler = pending.get(streamId);
+            }
+            else {
+                handler = pending.remove(streamId);
+                streamIdHandler.release(streamId);
+            }
+
             if (handler == null) {
                 /**
                  * During normal operation, we should not receive responses for which we don't have a handler. There is
@@ -1010,6 +1017,8 @@ class Connection {
             }
             handler.cancelTimeout();
             handler.callback.onSet(Connection.this, response, System.nanoTime() - handler.startTime, handler.retryCount);
+            if (response.isMultiPart())
+                handler.startTimeout();
 
             // If we happen to be closed and we're the last outstanding request, we need to terminate the connection
             // (note: this is racy as the signaling can be called more than once, but that's not a problem)

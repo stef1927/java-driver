@@ -62,6 +62,7 @@ public abstract class Statement {
     private volatile ConsistencyLevel consistency;
     private volatile ConsistencyLevel serialConsistency;
     private volatile boolean traceQuery;
+    private volatile boolean isStreaming;
     private volatile int fetchSize;
     private volatile long defaultTimestamp = Long.MIN_VALUE;
     private volatile int readTimeoutMillis = Integer.MIN_VALUE;
@@ -69,6 +70,7 @@ public abstract class Statement {
     private volatile ByteBuffer pagingState;
     protected volatile Boolean idempotent;
     private volatile Map<String, ByteBuffer> outgoingPayload;
+    private TokenRange tokenRange;
 
     // We don't want to expose the constructor, because the code relies on this being only sub-classed by RegularStatement, BoundStatement and BatchStatement
     Statement() {
@@ -175,6 +177,31 @@ public abstract class Statement {
         return traceQuery;
     }
 
+
+    /**
+     * Request streaming of data. When querying partitions
+     * that are local to the host and with consistency level set to ONE,
+     * as typically done by analytics tools, the entire data set will be streamed
+     * in multiple responses. This will result in the callback being invoked multiple
+     * times without the need to fetch pages manually.
+     * @return this statement.
+     */
+    public Statement requestStreaming() {
+        isStreaming = true;
+        return this;
+    }
+
+    /**
+     * Return whether multi-part results should be streamed for this query or not.
+     * Currently only supported for select statements in limited cases, @see {@code }Select.requestStreaming}.
+     *
+     * @return {@code true} if streaming was requested for this statement, {@code false}
+     * otherwise.
+     */
+    public boolean isStreaming() {
+        return isStreaming;
+    }
+
     /**
      * Returns the routing key (in binary raw form) to use for token aware
      * routing of this query.
@@ -196,6 +223,26 @@ public abstract class Statement {
      * @return the routing key for this query or {@code null}.
      */
     public abstract ByteBuffer getRoutingKey(ProtocolVersion protocolVersion, CodecRegistry codecRegistry);
+
+    /**
+     * Returns the routing token, which is just like the routing key defined above excpet that
+     * is has already been hashed.
+     *
+     * @return an optional routing token for this statement or {@code null}
+     */
+    public TokenRange getRoutingTokenRange()
+    {
+        return tokenRange;
+    }
+
+    /**
+     * Set a routing token for this statement. Load balancing policies may use this token to determine
+     * which replicas to send the query to.
+    */
+    public void setRoutingTokenRange(TokenRange tokenRange)
+    {
+        this.tokenRange = tokenRange;
+    }
 
     /**
      * Returns the keyspace this query operates on.

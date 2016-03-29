@@ -16,15 +16,13 @@
 package com.datastax.driver.core;
 
 import com.datastax.driver.core.Message.Response;
-import com.datastax.driver.core.exceptions.DriverInternalError;
-import com.datastax.driver.core.exceptions.InvalidQueryException;
-import com.datastax.driver.core.exceptions.UnsupportedFeatureException;
-import com.datastax.driver.core.exceptions.UnsupportedProtocolVersionException;
+import com.datastax.driver.core.exceptions.*;
 import com.datastax.driver.core.policies.LoadBalancingPolicy;
 import com.datastax.driver.core.policies.ReconnectionPolicy;
 import com.datastax.driver.core.policies.SpeculativeExecutionPolicy;
 import com.datastax.driver.core.utils.MoreFutures;
 import com.google.common.base.Functions;
+import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.common.util.concurrent.*;
@@ -35,10 +33,7 @@ import org.slf4j.LoggerFactory;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -150,6 +145,50 @@ class SessionManager extends AbstractSession {
             }, executor());
             return chainedFuture;
         }
+    }
+
+    @Override
+    public Iterator<ResultSetFuture> stream(final Statement statement)
+    {
+        statement.requestStreaming();
+
+        final BlockingDeque<StreamingRequestHandlerCallback.ResultSetFutureImpl> queue =
+                new LinkedBlockingDeque<StreamingRequestHandlerCallback.ResultSetFutureImpl>();
+
+        if (isInit) {
+            StreamingRequestHandlerCallback cb = new StreamingRequestHandlerCallback(queue, this,
+                    cluster.manager.protocolVersion(), makeRequestMessage(statement, null));
+
+            new RequestHandler(this, cb, statement).sendRequest();
+        }
+        else
+        {
+            this.initAsync().addListener(new Runnable() {
+                @Override
+                public void run() {
+                    StreamingRequestHandlerCallback cb = new StreamingRequestHandlerCallback(queue, SessionManager.this,
+                            cluster.manager.protocolVersion(), makeRequestMessage(statement, null));
+
+                    new RequestHandler(SessionManager.this, cb, statement).sendRequest();
+                }
+            }, executor());
+        }
+
+        return new AbstractIterator<ResultSetFuture>() {
+            @Override
+            protected ResultSetFuture computeNext() {
+                try {
+                    ResultSetFuture ret = queue.take();
+                    logger.debug("Got result: {}", ret);
+                    return ret == StreamingRequestHandlerCallback.STOP ? endOfData() : ret;
+                }
+                catch (InterruptedException ex)
+                {
+                    logger.error("Got interrupted in rsf iterator", ex);
+                    return endOfData();
+                }
+            }
+        };
     }
 
     @Override
@@ -568,7 +607,7 @@ class SessionManager extends AbstractSession {
 
             Requests.QueryProtocolOptions options = new Requests.QueryProtocolOptions(Message.Request.Type.QUERY, consistency, positionalValues, namedValues,
                     false, fetchSize, usedPagingState, serialConsistency, defaultTimestamp);
-            request = new Requests.Query(qString, options, statement.isTracing());
+            request = new Requests.Query(qString, options, statement.isTracing(), statement.isStreaming());
         } else if (statement instanceof BoundStatement) {
             BoundStatement bs = (BoundStatement) statement;
             if (!cluster.manager.preparedQueries.containsKey(bs.statement.getPreparedId().id)) {
@@ -580,7 +619,7 @@ class SessionManager extends AbstractSession {
             boolean skipMetadata = protocolVersion != ProtocolVersion.V1 && bs.statement.getPreparedId().resultSetMetadata != null;
             Requests.QueryProtocolOptions options = new Requests.QueryProtocolOptions(Message.Request.Type.EXECUTE, consistency, Arrays.asList(bs.wrapper.values), Collections.<String, ByteBuffer>emptyMap(),
                     skipMetadata, fetchSize, usedPagingState, serialConsistency, defaultTimestamp);
-            request = new Requests.Execute(bs.statement.getPreparedId().id, options, statement.isTracing());
+            request = new Requests.Execute(bs.statement.getPreparedId().id, options, statement.isTracing(), statement.isStreaming());
         } else {
             assert statement instanceof BatchStatement : statement;
             assert pagingState == null;
