@@ -144,7 +144,7 @@ class SessionManager extends AbstractSession {
     }
 
     @Override
-    public Iterator<ResultSetFuture> streamAsync(final Statement statement)
+    public Iterator<ResultSetFuture> stream(final Statement statement)
     {
         statement.requestStreaming();
 

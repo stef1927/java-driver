@@ -108,6 +108,11 @@ class StreamingRequestHandlerCallback implements RequestHandler.Callback {
 
     private void maybeClose(Message.Response response)
     {
+        // we have a BUG that sometime causes some final pages to be missed
+        // when the driver is overwhelmed, this is because if the last message
+        // is processed by a thread before any of the preceding messages,
+        // they will be missed, to fix this we need to add a sequence number to the
+        // replies
         if (!response.isMultiPart())
             sendResult(STOP);
     }
