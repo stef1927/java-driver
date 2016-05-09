@@ -218,6 +218,21 @@ class Requests {
         }
     }
 
+    static <E extends Enum<E>> EnumSet<E> deserializeFlags(int flags, E[] values, EnumSet<E> set) {
+        for (int n = 0; n < values.length; n++) {
+            if ((flags & (1 << n)) != 0)
+                set.add(values[n]);
+        }
+        return set;
+    }
+
+    static <E extends Enum<E>> int serializeFlags(EnumSet<E> flags) {
+        int i = 0;
+        for (E flag : flags)
+            i |= 1 << flag.ordinal();
+        return i;
+    }
+
     enum QueryFlag {
         // The order of that enum matters!!
         VALUES,
@@ -226,23 +241,28 @@ class Requests {
         PAGING_STATE,
         SERIAL_CONSISTENCY,
         DEFAULT_TIMESTAMP,
-        VALUE_NAMES;
+        VALUE_NAMES,
+        EXTENDED_FLAGS;
 
         static EnumSet<QueryFlag> deserialize(int flags) {
-            EnumSet<QueryFlag> set = EnumSet.noneOf(QueryFlag.class);
-            QueryFlag[] values = QueryFlag.values();
-            for (int n = 0; n < values.length; n++) {
-                if ((flags & (1 << n)) != 0)
-                    set.add(values[n]);
-            }
-            return set;
+            return deserializeFlags(flags, QueryFlag.values(), EnumSet.noneOf(QueryFlag.class));
         }
 
         static int serialize(EnumSet<QueryFlag> flags) {
-            int i = 0;
-            for (QueryFlag flag : flags)
-                i |= 1 << flag.ordinal();
-            return i;
+            return serializeFlags(flags);
+        }
+    }
+
+    enum ExtendedQueryFlag {
+        // The order of that enum matters!!
+        OPTIMIZE_QUERY;
+
+        static EnumSet<ExtendedQueryFlag> deserialize(int flags) {
+            return deserializeFlags(flags, ExtendedQueryFlag.values(), EnumSet.noneOf(ExtendedQueryFlag.class));
+        }
+
+        static int serialize(EnumSet<ExtendedQueryFlag> flags) {
+            return serializeFlags(flags);
         }
     }
 
@@ -256,9 +276,12 @@ class Requests {
                 false,
                 -1,
                 null,
-                ConsistencyLevel.SERIAL, Long.MIN_VALUE);
+                ConsistencyLevel.SERIAL,
+                Long.MIN_VALUE,
+                false);
 
         private final EnumSet<QueryFlag> flags = EnumSet.noneOf(QueryFlag.class);
+        private final EnumSet<ExtendedQueryFlag> extendedFlags = EnumSet.noneOf(ExtendedQueryFlag.class);
         private final Message.Request.Type requestType;
         final ConsistencyLevel consistency;
         final List<ByteBuffer> positionalValues;
@@ -268,6 +291,7 @@ class Requests {
         final ByteBuffer pagingState;
         final ConsistencyLevel serialConsistency;
         final long defaultTimestamp;
+        final boolean optimizeQuery;
 
         QueryProtocolOptions(Message.Request.Type requestType,
                              ConsistencyLevel consistency,
@@ -277,7 +301,8 @@ class Requests {
                              int pageSize,
                              ByteBuffer pagingState,
                              ConsistencyLevel serialConsistency,
-                             long defaultTimestamp) {
+                             long defaultTimestamp,
+                             boolean optimizeQuery) {
 
             Preconditions.checkArgument(positionalValues.isEmpty() || namedValues.isEmpty());
 
@@ -290,6 +315,7 @@ class Requests {
             this.pagingState = pagingState;
             this.serialConsistency = serialConsistency;
             this.defaultTimestamp = defaultTimestamp;
+            this.optimizeQuery = optimizeQuery;
 
             // Populate flags
             if (!positionalValues.isEmpty())
@@ -308,10 +334,15 @@ class Requests {
                 flags.add(QueryFlag.SERIAL_CONSISTENCY);
             if (defaultTimestamp != Long.MIN_VALUE)
                 flags.add(QueryFlag.DEFAULT_TIMESTAMP);
+            if (optimizeQuery) {
+                flags.add(QueryFlag.EXTENDED_FLAGS);
+                extendedFlags.add(ExtendedQueryFlag.OPTIMIZE_QUERY);
+            }
         }
 
         QueryProtocolOptions copy(ConsistencyLevel newConsistencyLevel) {
-            return new QueryProtocolOptions(requestType, newConsistencyLevel, positionalValues, namedValues, skipMetadata, pageSize, pagingState, serialConsistency, defaultTimestamp);
+            return new QueryProtocolOptions(requestType, newConsistencyLevel, positionalValues, namedValues,
+                    skipMetadata, pageSize, pagingState, serialConsistency, defaultTimestamp, optimizeQuery);
         }
 
         void encode(ByteBuf dest, ProtocolVersion version) {
@@ -328,6 +359,8 @@ class Requests {
                 case V4:
                     CBUtil.writeConsistencyLevel(consistency, dest);
                     dest.writeByte((byte) QueryFlag.serialize(flags));
+                    if (flags.contains(QueryFlag.EXTENDED_FLAGS))
+                        dest.writeByte((byte) ExtendedQueryFlag.serialize(extendedFlags));
                     if (flags.contains(QueryFlag.VALUES)) {
                         if (flags.contains(QueryFlag.VALUE_NAMES)) {
                             assert version.compareTo(ProtocolVersion.V3) >= 0;
@@ -363,6 +396,8 @@ class Requests {
                     int size = 0;
                     size += CBUtil.sizeOfConsistencyLevel(consistency);
                     size += 1; // flags
+                    if (flags.contains(QueryFlag.EXTENDED_FLAGS))
+                        size += 1; //extended flags
                     if (flags.contains(QueryFlag.VALUES)) {
                         if (flags.contains(QueryFlag.VALUE_NAMES)) {
                             assert version.compareTo(ProtocolVersion.V3) >= 0;
@@ -387,8 +422,8 @@ class Requests {
 
         @Override
         public String toString() {
-            return String.format("[cl=%s, positionalVals=%s, namedVals=%s, skip=%b, psize=%d, state=%s, serialCl=%s]",
-                    consistency, positionalValues, namedValues, skipMetadata, pageSize, pagingState, serialConsistency);
+            return String.format("[cl=%s, positionalVals=%s, namedVals=%s, skip=%b, psize=%d, state=%s, serialCl=%s, optimizeQuery=%b]",
+                    consistency, positionalValues, namedValues, skipMetadata, pageSize, pagingState, serialConsistency, optimizeQuery);
         }
     }
 

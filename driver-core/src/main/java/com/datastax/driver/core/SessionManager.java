@@ -606,7 +606,7 @@ class SessionManager extends AbstractSession {
             String qString = rs.getQueryString();
 
             Requests.QueryProtocolOptions options = new Requests.QueryProtocolOptions(Message.Request.Type.QUERY, consistency, positionalValues, namedValues,
-                    false, fetchSize, usedPagingState, serialConsistency, defaultTimestamp);
+                    false, fetchSize, usedPagingState, serialConsistency, defaultTimestamp, statement.getOptimizeQuery());
             request = new Requests.Query(qString, options, statement.isTracing(), statement.isStreaming());
         } else if (statement instanceof BoundStatement) {
             BoundStatement bs = (BoundStatement) statement;
@@ -618,7 +618,7 @@ class SessionManager extends AbstractSession {
                 bs.ensureAllSet();
             boolean skipMetadata = protocolVersion != ProtocolVersion.V1 && bs.statement.getPreparedId().resultSetMetadata != null;
             Requests.QueryProtocolOptions options = new Requests.QueryProtocolOptions(Message.Request.Type.EXECUTE, consistency, Arrays.asList(bs.wrapper.values), Collections.<String, ByteBuffer>emptyMap(),
-                    skipMetadata, fetchSize, usedPagingState, serialConsistency, defaultTimestamp);
+                    skipMetadata, fetchSize, usedPagingState, serialConsistency, defaultTimestamp, statement.getOptimizeQuery());
             request = new Requests.Execute(bs.statement.getPreparedId().id, options, statement.isTracing(), statement.isStreaming());
         } else {
             assert statement instanceof BatchStatement : statement;

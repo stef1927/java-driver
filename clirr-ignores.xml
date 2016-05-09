@@ -64,14 +64,26 @@
 
     <difference>
         <className>com/datastax/driver/core/Statement</className>
-        <differenceType>7012</differenceType> <!-- method added to interface -->
+        <differenceType>7012</differenceType> <!-- method added to class -->
         <method>com.datastax.driver.core.TokenRange getRoutingTokenRange()</method>
     </difference>
 
     <difference>
         <className>com/datastax/driver/core/Statement</className>
-        <differenceType>7012</differenceType> <!-- method added to interface -->
-        <method>void setRoutingTokenRange(com.datastax.driver.core.TokenRange</method>
+        <differenceType>7012</differenceType> <!-- method added to class -->
+        <method>void setRoutingTokenRange(com.datastax.driver.core.TokenRange)</method>
+    </difference>
+
+    <difference>
+        <className>com/datastax/driver/core/Statement</className>
+        <differenceType>7012</differenceType> <!-- method added to class -->
+        <method>Statement optimizeQuery(boolean optimize)</method>
+    </difference>
+
+    <difference>
+        <className>com/datastax/driver/core/Statement</className>
+        <differenceType>7012</differenceType> <!-- method added to class -->
+        <method>boolean getOptimizeQuery()</method>
     </difference>
 
 </differences>

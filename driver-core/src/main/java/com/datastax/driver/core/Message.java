@@ -104,6 +104,7 @@ abstract class Message {
         final Type type;
         private final boolean tracingRequested;
         private final boolean streamingRequested;
+        private Host preferredHost;
 
         protected Request(Type type) {
             this(type, false);
@@ -186,6 +187,16 @@ abstract class Message {
                 default:
                     return null;
             }
+        }
+
+        public void setPreferredHost(Host host)
+        {
+            this.preferredHost = host;
+        }
+
+        public Host getPreferredHost()
+        {
+            return this.preferredHost;
         }
 
         abstract Request copy();

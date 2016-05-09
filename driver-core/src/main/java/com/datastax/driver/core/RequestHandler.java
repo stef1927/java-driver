@@ -75,9 +75,10 @@ class RequestHandler {
 
         callback.register(this);
 
-        this.queryPlan = new QueryPlan(manager.loadBalancingPolicy().newQueryPlan(manager.poolsState.keyspace, statement));
+        this.queryPlan = new QueryPlan(callback.request().getPreferredHost(),
+                                       manager.loadBalancingPolicy().newQueryPlan(manager.poolsState.keyspace, statement));
         this.speculativeExecutionPlan = manager.speculativeExecutionPolicy().newPlan(manager.poolsState.keyspace, statement);
-        this.allowSpeculativeExecutions = statement != Statement.DEFAULT
+        this.allowSpeculativeExecutions = statement != Statement.DEFAULT && !statement.getOptimizeQuery()
                 && statement.isIdempotentWithDefault(manager.configuration().getQueryOptions());
         this.statement = statement;
 
@@ -841,20 +842,34 @@ class RequestHandler {
 
     /**
      * Wraps the iterator return by {@link com.datastax.driver.core.policies.LoadBalancingPolicy} to make it safe for
-     * concurrent access by multiple threads.
+     * concurrent access by multiple threads. Returns the preferred host first, if it is not null.
      */
     static class QueryPlan {
+        private final Host preferedHost;
         private final Iterator<Host> iterator;
+        private boolean preferredReturned;
 
-        QueryPlan(Iterator<Host> iterator) {
+        QueryPlan(Host preferredHost, Iterator<Host> iterator) {
+            this.preferedHost = preferredHost;
             this.iterator = iterator;
         }
 
         /**
-         * @return null if there are no more hosts
+         * @return the next host to query, null if there are no more hosts
          */
         synchronized Host next() {
-            return iterator.hasNext() ? iterator.next() : null;
+            if (preferedHost != null && !preferredReturned) {
+                preferredReturned = true;
+                return preferedHost;
+            }
+
+            while (iterator.hasNext()) {
+                Host ret = iterator.next();
+                if (preferedHost == null || !ret.equals(preferedHost))
+                    return ret;
+            }
+
+            return null;
         }
     }
 }

@@ -335,12 +335,16 @@ abstract class ArrayBackedResultSet implements ResultSet {
 
         private ListenableFuture<ResultSet> queryNextPage(ByteBuffer nextStart, final SettableFuture<ResultSet> future) {
 
-            Statement statement = this.infos.peek().getStatement();
-
-
+            ExecutionInfo info = this.infos.peek();
+            Statement statement = info.getStatement();
             assert !(statement instanceof BatchStatement);
 
             final Message.Request request = session.makeRequestMessage(statement, nextStart);
+            // For optimized queries we want to retrieve more pages from the same host because it
+            // may have pre-fetched pages for us.
+            if (statement.getOptimizeQuery())
+                request.setPreferredHost(info.getQueriedHost());
+
             session.execute(new RequestHandler.Callback() {
 
                 @Override
