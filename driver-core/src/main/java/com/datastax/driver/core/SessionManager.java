@@ -22,7 +22,6 @@ import com.datastax.driver.core.policies.ReconnectionPolicy;
 import com.datastax.driver.core.policies.SpeculativeExecutionPolicy;
 import com.datastax.driver.core.utils.MoreFutures;
 import com.google.common.base.Functions;
-import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.common.util.concurrent.*;
@@ -148,47 +147,25 @@ class SessionManager extends AbstractSession {
     }
 
     @Override
-    public Iterator<ResultSetFuture> stream(final Statement statement)
+    public ResultSetIterator executeAsync(final Statement statement, final AsyncPagingOptions pagingOptions)
     {
-        statement.requestStreaming();
-
-        final BlockingDeque<StreamingRequestHandlerCallback.ResultSetFutureImpl> queue =
-                new LinkedBlockingDeque<StreamingRequestHandlerCallback.ResultSetFutureImpl>();
+        final PriorityBlockingQueue<AsyncRequestHandlerCallback.Result> queue = new PriorityBlockingQueue<AsyncRequestHandlerCallback.Result>();
+        final AsyncRequestHandlerCallback cb = new AsyncRequestHandlerCallback(queue, this, cluster.manager,
+                makeRequestMessage(statement, null, pagingOptions), pagingOptions);
 
         if (isInit) {
-            StreamingRequestHandlerCallback cb = new StreamingRequestHandlerCallback(queue, this,
-                    cluster.manager.protocolVersion(), makeRequestMessage(statement, null));
-
             new RequestHandler(this, cb, statement).sendRequest();
         }
-        else
-        {
+        else {
             this.initAsync().addListener(new Runnable() {
                 @Override
                 public void run() {
-                    StreamingRequestHandlerCallback cb = new StreamingRequestHandlerCallback(queue, SessionManager.this,
-                            cluster.manager.protocolVersion(), makeRequestMessage(statement, null));
-
                     new RequestHandler(SessionManager.this, cb, statement).sendRequest();
                 }
             }, executor());
         }
 
-        return new AbstractIterator<ResultSetFuture>() {
-            @Override
-            protected ResultSetFuture computeNext() {
-                try {
-                    ResultSetFuture ret = queue.take();
-                    logger.debug("Got result: {}", ret);
-                    return ret == StreamingRequestHandlerCallback.STOP ? endOfData() : ret;
-                }
-                catch (InterruptedException ex)
-                {
-                    logger.error("Got interrupted in rsf iterator", ex);
-                    return endOfData();
-                }
-            }
-        };
+        return new AsyncResultSetIterator(cb, statement, cluster, queue);
     }
 
     @Override
@@ -527,6 +504,11 @@ class SessionManager extends AbstractSession {
     }
 
     Message.Request makeRequestMessage(Statement statement, ByteBuffer pagingState) {
+        return makeRequestMessage(statement, pagingState, AsyncPagingOptions.NO_PAGING);
+    }
+
+    Message.Request makeRequestMessage(Statement statement, ByteBuffer pagingState, AsyncPagingOptions asyncPagingOptions)
+    {
         // We need the protocol version, which is only available once the cluster has initialized. Initialize the session to ensure this is the case.
         // init() locks, so avoid if we know we don't need it.
         if (!isInit)
@@ -605,9 +587,10 @@ class SessionManager extends AbstractSession {
 
             String qString = rs.getQueryString();
 
-            Requests.QueryProtocolOptions options = new Requests.QueryProtocolOptions(Message.Request.Type.QUERY, consistency, positionalValues, namedValues,
-                    false, fetchSize, usedPagingState, serialConsistency, defaultTimestamp, statement.getOptimizeQuery());
-            request = new Requests.Query(qString, options, statement.isTracing(), statement.isStreaming());
+            Requests.QueryProtocolOptions options = new Requests.QueryProtocolOptions(Message.Request.Type.QUERY,
+                    consistency, positionalValues, namedValues, false, fetchSize, usedPagingState, serialConsistency,
+                    defaultTimestamp, asyncPagingOptions);
+            request = new Requests.Query(qString, options, statement.isTracing());
         } else if (statement instanceof BoundStatement) {
             BoundStatement bs = (BoundStatement) statement;
             if (!cluster.manager.preparedQueries.containsKey(bs.statement.getPreparedId().id)) {
@@ -617,9 +600,10 @@ class SessionManager extends AbstractSession {
             if (protocolVersion.compareTo(ProtocolVersion.V4) < 0)
                 bs.ensureAllSet();
             boolean skipMetadata = protocolVersion != ProtocolVersion.V1 && bs.statement.getPreparedId().resultSetMetadata != null;
-            Requests.QueryProtocolOptions options = new Requests.QueryProtocolOptions(Message.Request.Type.EXECUTE, consistency, Arrays.asList(bs.wrapper.values), Collections.<String, ByteBuffer>emptyMap(),
-                    skipMetadata, fetchSize, usedPagingState, serialConsistency, defaultTimestamp, statement.getOptimizeQuery());
-            request = new Requests.Execute(bs.statement.getPreparedId().id, options, statement.isTracing(), statement.isStreaming());
+            Requests.QueryProtocolOptions options = new Requests.QueryProtocolOptions(Message.Request.Type.EXECUTE,
+                    consistency, Arrays.asList(bs.wrapper.values), Collections.<String, ByteBuffer>emptyMap(), skipMetadata, fetchSize,
+                    usedPagingState, serialConsistency, defaultTimestamp, asyncPagingOptions);
+            request = new Requests.Execute(bs.statement.getPreparedId().id, options, statement.isTracing());
         } else {
             assert statement instanceof BatchStatement : statement;
             assert pagingState == null;

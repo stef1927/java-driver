@@ -29,6 +29,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingDeque;
+import java.util.concurrent.PriorityBlockingQueue;
 
 /**
  * Default implementation of a result set, backed by an ArrayDeque of ArrayList.
@@ -37,24 +38,26 @@ abstract class ArrayBackedResultSet implements ResultSet {
 
     private static final Logger logger = LoggerFactory.getLogger(ResultSet.class);
 
-    private static final Queue<List<ByteBuffer>> EMPTY_QUEUE = new ArrayDeque<List<ByteBuffer>>(0);
-
     protected final ColumnDefinitions metadata;
     protected final Token.Factory tokenFactory;
     private final boolean wasApplied;
+    protected final AsyncPagingOptions pagingOptions;
 
     protected final ProtocolVersion protocolVersion;
     protected final CodecRegistry codecRegistry;
 
-    private ArrayBackedResultSet(ColumnDefinitions metadata, Token.Factory tokenFactory, List<ByteBuffer> firstRow, ProtocolVersion protocolVersion, CodecRegistry codecRegistry) {
+    private ArrayBackedResultSet(ColumnDefinitions metadata, Token.Factory tokenFactory, List<ByteBuffer> firstRow,
+                                 ProtocolVersion protocolVersion, CodecRegistry codecRegistry, AsyncPagingOptions pagingOptions) {
         this.metadata = metadata;
         this.protocolVersion = protocolVersion;
         this.codecRegistry = codecRegistry;
         this.tokenFactory = tokenFactory;
         this.wasApplied = checkWasApplied(firstRow, metadata, protocolVersion);
+        this.pagingOptions = pagingOptions;
     }
 
-    static ArrayBackedResultSet fromMessage(Responses.Result msg, SessionManager session, ProtocolVersion protocolVersion, ExecutionInfo info, Statement statement) {
+    static ArrayBackedResultSet fromMessage(Responses.Result msg, SessionManager session, ProtocolVersion protocolVersion,
+                                            ExecutionInfo info, Statement statement, AsyncPagingOptions pagingOptions) {
 
         switch (msg.kind) {
             case ROWS:
@@ -82,8 +85,8 @@ abstract class ArrayBackedResultSet implements ResultSet {
                 assert r.metadata.pagingState == null || info != null;
 
                 return r.metadata.pagingState == null
-                        ? new SinglePage(columnDefs, tokenFactory, protocolVersion, columnDefs.codecRegistry, r.data, info)
-                        : new MultiPage(columnDefs, tokenFactory, protocolVersion, columnDefs.codecRegistry, r.data, info, r.metadata.pagingState, session);
+                        ? new SinglePage(columnDefs, tokenFactory, protocolVersion, columnDefs.codecRegistry, r, info, pagingOptions)
+                        : new MultiPage(columnDefs, tokenFactory, protocolVersion, columnDefs.codecRegistry, r, info, session, pagingOptions);
 
             case VOID:
             case SET_KEYSPACE:
@@ -113,7 +116,7 @@ abstract class ArrayBackedResultSet implements ResultSet {
 
     private static ArrayBackedResultSet empty(ExecutionInfo info) {
         // We could pass the protocol version but we know we won't need it so passing a bogus value (null)
-        return new SinglePage(ColumnDefinitions.EMPTY, null, null, null, EMPTY_QUEUE, info);
+        return new SinglePage(ColumnDefinitions.EMPTY, null, null, null, Responses.Result.Rows.EMPTY, info, AsyncPagingOptions.NO_PAGING);
     }
 
     @Override
@@ -161,6 +164,9 @@ abstract class ArrayBackedResultSet implements ResultSet {
     }
 
     @Override
+    public AsyncPagingOptions pagingOptions() { return pagingOptions; }
+
+    @Override
     public String toString() {
         StringBuilder sb = new StringBuilder();
         sb.append("ResultSet[ exhausted: ").append(isExhausted());
@@ -177,11 +183,12 @@ abstract class ArrayBackedResultSet implements ResultSet {
                            Token.Factory tokenFactory,
                            ProtocolVersion protocolVersion,
                            CodecRegistry codecRegistry,
-                           Queue<List<ByteBuffer>> rows,
-                           ExecutionInfo info) {
-            super(metadata, tokenFactory, rows.peek(), protocolVersion, codecRegistry);
+                           Responses.Result.Rows msg,
+                           ExecutionInfo info,
+                           AsyncPagingOptions pagingOptions) {
+            super(metadata, tokenFactory, msg.data.peek(), protocolVersion, codecRegistry, pagingOptions);
             this.info = info;
-            this.rows = rows;
+            this.rows = msg.data;
         }
 
         @Override
@@ -207,6 +214,11 @@ abstract class ArrayBackedResultSet implements ResultSet {
         @Override
         public ListenableFuture<ResultSet> fetchMoreResults() {
             return Futures.<ResultSet>immediateFuture(this);
+        }
+
+        @Override
+        public ResultSetIterator fetchRemainingResults() {
+            return ResultSetIterator.EMPTY;
         }
 
         @Override
@@ -248,19 +260,19 @@ abstract class ArrayBackedResultSet implements ResultSet {
                           Token.Factory tokenFactory,
                           ProtocolVersion protocolVersion,
                           CodecRegistry codecRegistry,
-                          Queue<List<ByteBuffer>> rows,
+                          Responses.Result.Rows msg,
                           ExecutionInfo info,
-                          ByteBuffer pagingState,
-                          SessionManager session) {
+                          SessionManager session,
+                          AsyncPagingOptions pagingOptions) {
 
             // Note: as of Cassandra 2.1.0, it turns out that the result of a CAS update is never paged, so
             // we could hard-code the result of wasApplied in this class to "true". However, we can not be sure
             // that this will never change, so apply the generic check by peeking at the first row.
-            super(metadata, tokenFactory, rows.peek(), protocolVersion, codecRegistry);
-            this.currentPage = rows;
+            super(metadata, tokenFactory, msg.data.peek(), protocolVersion, codecRegistry, pagingOptions);
+            this.currentPage = msg.data;
             this.infos.offer(info);
 
-            this.fetchState = new FetchingState(pagingState, null);
+            this.fetchState = new FetchingState(msg.metadata.pagingState, null);
             this.session = session;
         }
 
@@ -335,16 +347,10 @@ abstract class ArrayBackedResultSet implements ResultSet {
 
         private ListenableFuture<ResultSet> queryNextPage(ByteBuffer nextStart, final SettableFuture<ResultSet> future) {
 
-            ExecutionInfo info = this.infos.peek();
-            Statement statement = info.getStatement();
+            Statement statement = this.infos.peek().getStatement();
             assert !(statement instanceof BatchStatement);
 
             final Message.Request request = session.makeRequestMessage(statement, nextStart);
-            // For optimized queries we want to retrieve more pages from the same host because it
-            // may have pre-fetched pages for us.
-            if (statement.getOptimizeQuery())
-                request.setPreferredHost(info.getQueriedHost());
-
             session.execute(new RequestHandler.Callback() {
 
                 @Override
@@ -423,6 +429,26 @@ abstract class ArrayBackedResultSet implements ResultSet {
             }, statement);
 
             return future;
+        }
+
+        @Override
+        public ResultSetIterator fetchRemainingResults()
+        {
+            if (fetchState == null || fetchState.nextStart == null)
+                return ResultSetIterator.EMPTY;
+
+            Statement statement = this.infos.peek().getStatement();
+            assert !(statement instanceof BatchStatement);
+
+            final PriorityBlockingQueue<AsyncRequestHandlerCallback.Result> queue = new PriorityBlockingQueue<AsyncRequestHandlerCallback.Result>();
+            final AsyncPagingOptions nextPagingOptions = pagingOptions.withNewId();
+
+            final AsyncRequestHandlerCallback cb = new AsyncRequestHandlerCallback(queue, session, session.cluster.manager,
+                    session.makeRequestMessage(statement, fetchState.nextStart, nextPagingOptions), nextPagingOptions);
+
+            new RequestHandler(session, cb, statement).sendRequest();
+
+            return new AsyncResultSetIterator(cb, statement, session.cluster, queue);
         }
 
         @Override

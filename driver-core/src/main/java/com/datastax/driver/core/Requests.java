@@ -20,10 +20,7 @@ import com.google.common.collect.ImmutableMap;
 import io.netty.buffer.ByteBuf;
 
 import java.nio.ByteBuffer;
-import java.util.Collections;
-import java.util.EnumSet;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 class Requests {
 
@@ -152,23 +149,23 @@ class Requests {
         final QueryProtocolOptions options;
 
         Query(String query) {
-            this(query, QueryProtocolOptions.DEFAULT, false, false);
+            this(query, QueryProtocolOptions.DEFAULT, false);
         }
 
-        Query(String query, QueryProtocolOptions options, boolean tracingRequested, boolean streamingRequested) {
-            super(Type.QUERY, tracingRequested, streamingRequested);
+        Query(String query, QueryProtocolOptions options, boolean tracingRequested) {
+            super(Type.QUERY, tracingRequested);
             this.query = query;
             this.options = options;
         }
 
         @Override
         Request copy() {
-            return new Query(this.query, options, isTracingRequested(), isStreamingRequested());
+            return new Query(this.query, options, isTracingRequested());
         }
 
         @Override
         Request copy(ConsistencyLevel newConsistencyLevel) {
-            return new Query(this.query, options.copy(newConsistencyLevel), isTracingRequested(), isStreamingRequested());
+            return new Query(this.query, options.copy(newConsistencyLevel), isTracingRequested());
         }
 
         @Override
@@ -196,20 +193,20 @@ class Requests {
         final MD5Digest statementId;
         final QueryProtocolOptions options;
 
-        Execute(MD5Digest statementId, QueryProtocolOptions options, boolean tracingRequested, boolean streamingRequested) {
-            super(Message.Request.Type.EXECUTE, tracingRequested, streamingRequested);
+        Execute(MD5Digest statementId, QueryProtocolOptions options, boolean tracingRequested) {
+            super(Message.Request.Type.EXECUTE, tracingRequested);
             this.statementId = statementId;
             this.options = options;
         }
 
         @Override
         Request copy() {
-            return new Execute(statementId, options, isTracingRequested(), isStreamingRequested());
+            return new Execute(statementId, options, isTracingRequested());
         }
 
         @Override
         Request copy(ConsistencyLevel newConsistencyLevel) {
-            return new Execute(statementId, options.copy(newConsistencyLevel), isTracingRequested(), isStreamingRequested());
+            return new Execute(statementId, options.copy(newConsistencyLevel), isTracingRequested());
         }
 
         @Override
@@ -255,7 +252,7 @@ class Requests {
 
     enum ExtendedQueryFlag {
         // The order of that enum matters!!
-        OPTIMIZE_QUERY;
+        WITH_ASYNC_PAGING;
 
         static EnumSet<ExtendedQueryFlag> deserialize(int flags) {
             return deserializeFlags(flags, ExtendedQueryFlag.values(), EnumSet.noneOf(ExtendedQueryFlag.class));
@@ -278,7 +275,7 @@ class Requests {
                 null,
                 ConsistencyLevel.SERIAL,
                 Long.MIN_VALUE,
-                false);
+                AsyncPagingOptions.NO_PAGING);
 
         private final EnumSet<QueryFlag> flags = EnumSet.noneOf(QueryFlag.class);
         private final EnumSet<ExtendedQueryFlag> extendedFlags = EnumSet.noneOf(ExtendedQueryFlag.class);
@@ -291,7 +288,7 @@ class Requests {
         final ByteBuffer pagingState;
         final ConsistencyLevel serialConsistency;
         final long defaultTimestamp;
-        final boolean optimizeQuery;
+        final AsyncPagingOptions asyncPagingOptions;
 
         QueryProtocolOptions(Message.Request.Type requestType,
                              ConsistencyLevel consistency,
@@ -302,7 +299,7 @@ class Requests {
                              ByteBuffer pagingState,
                              ConsistencyLevel serialConsistency,
                              long defaultTimestamp,
-                             boolean optimizeQuery) {
+                             AsyncPagingOptions asyncPagingOptions) {
 
             Preconditions.checkArgument(positionalValues.isEmpty() || namedValues.isEmpty());
 
@@ -315,7 +312,7 @@ class Requests {
             this.pagingState = pagingState;
             this.serialConsistency = serialConsistency;
             this.defaultTimestamp = defaultTimestamp;
-            this.optimizeQuery = optimizeQuery;
+            this.asyncPagingOptions = asyncPagingOptions;
 
             // Populate flags
             if (!positionalValues.isEmpty())
@@ -334,15 +331,15 @@ class Requests {
                 flags.add(QueryFlag.SERIAL_CONSISTENCY);
             if (defaultTimestamp != Long.MIN_VALUE)
                 flags.add(QueryFlag.DEFAULT_TIMESTAMP);
-            if (optimizeQuery) {
+            if (asyncPagingOptions.enabled()) {
                 flags.add(QueryFlag.EXTENDED_FLAGS);
-                extendedFlags.add(ExtendedQueryFlag.OPTIMIZE_QUERY);
+                extendedFlags.add(ExtendedQueryFlag.WITH_ASYNC_PAGING);
             }
         }
 
         QueryProtocolOptions copy(ConsistencyLevel newConsistencyLevel) {
             return new QueryProtocolOptions(requestType, newConsistencyLevel, positionalValues, namedValues,
-                    skipMetadata, pageSize, pagingState, serialConsistency, defaultTimestamp, optimizeQuery);
+                    skipMetadata, pageSize, pagingState, serialConsistency, defaultTimestamp, asyncPagingOptions);
         }
 
         void encode(ByteBuf dest, ProtocolVersion version) {
@@ -377,6 +374,9 @@ class Requests {
                         CBUtil.writeConsistencyLevel(serialConsistency, dest);
                     if (version.compareTo(ProtocolVersion.V3) >= 0 && flags.contains(QueryFlag.DEFAULT_TIMESTAMP))
                         dest.writeLong(defaultTimestamp);
+                    if (version.compareTo(ProtocolVersion.V4) >= 0 && extendedFlags.contains(ExtendedQueryFlag.WITH_ASYNC_PAGING))
+                        encode(asyncPagingOptions, dest);
+
                     break;
                 default:
                     throw version.unsupported();
@@ -414,16 +414,30 @@ class Requests {
                         size += CBUtil.sizeOfConsistencyLevel(serialConsistency);
                     if (version == ProtocolVersion.V3 && flags.contains(QueryFlag.DEFAULT_TIMESTAMP))
                         size += 8;
+                    if (version.compareTo(ProtocolVersion.V4) >= 0 && extendedFlags.contains(ExtendedQueryFlag.WITH_ASYNC_PAGING))
+                        size += encodedSize(asyncPagingOptions);
                     return size;
                 default:
                     throw version.unsupported();
             }
         }
 
+        private void encode(AsyncPagingOptions options, ByteBuf dest) {
+            CBUtil.writeUUID(options.id, dest);
+            dest.writeInt(options.pageSize);
+            dest.writeInt(options.pageUnit.id);
+            dest.writeInt(options.maxPages);
+            dest.writeInt(options.maxPagesPerSecond);
+        }
+
+        private int encodedSize(AsyncPagingOptions options) {
+            return CBUtil.sizeOfUUID(options.id) + 16;
+        }
+
         @Override
         public String toString() {
-            return String.format("[cl=%s, positionalVals=%s, namedVals=%s, skip=%b, psize=%d, state=%s, serialCl=%s, optimizeQuery=%b]",
-                    consistency, positionalValues, namedValues, skipMetadata, pageSize, pagingState, serialConsistency, optimizeQuery);
+            return String.format("[cl=%s, positionalVals=%s, namedVals=%s, skip=%b, psize=%d, state=%s, serialCl=%s, asyncPagingOptions=%s]",
+                    consistency, positionalValues, namedValues, skipMetadata, pageSize, pagingState, serialConsistency, asyncPagingOptions);
         }
     }
 
@@ -678,6 +692,53 @@ class Requests {
         @Override
         Request copy() {
             return new AuthResponse(token);
+        }
+    }
+
+    static class Cancel extends Message.Request {
+
+        public enum OperationType
+        {
+            ASYNC_PAGING(1);
+
+            private final int id;
+            OperationType(int id)
+            {
+                this.id = id;
+            }
+        }
+
+        static final Message.Coder<Cancel> coder = new Message.Coder<Cancel>() {
+
+            @Override
+            public void encode(Cancel msg, ByteBuf dest, ProtocolVersion version) {
+                dest.writeInt(msg.operationType.id);
+                CBUtil.writeUUID(msg.uuid, dest);
+            }
+
+            @Override
+            public int encodedSize(Cancel msg, ProtocolVersion version) {
+                return 4 + CBUtil.sizeOfUUID(msg.uuid);
+            }
+        };
+
+        private final OperationType operationType;
+        private final UUID uuid;
+
+        Cancel(OperationType operationType, UUID uuid) {
+            super(Type.CANCEL);
+            this.operationType = operationType;
+            this.uuid = uuid;
+        }
+
+        @Override
+        Request copy() {
+            return new Cancel(operationType, uuid);
+        }
+
+        public static Cancel asyncPaging(UUID uuid)
+        {
+            return new Cancel(OperationType.ASYNC_PAGING, uuid);
         }
     }
 }

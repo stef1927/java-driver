@@ -329,13 +329,16 @@ class Responses {
 
         static class Rows extends Result {
 
+            static final Rows EMPTY = new Rows(Metadata.EMPTY, new ArrayDeque<List<ByteBuffer>>(0), ProtocolVersion.NEWEST_SUPPORTED);
+
             static class Metadata {
 
                 private enum Flag {
                     // The order of that enum matters!!
                     GLOBAL_TABLES_SPEC,
                     HAS_MORE_PAGES,
-                    NO_METADATA;
+                    NO_METADATA,
+                    WITH_ASYNC_PAGING;
 
                     static EnumSet<Flag> deserialize(int flags) {
                         EnumSet<Flag> set = EnumSet.noneOf(Flag.class);
@@ -355,18 +358,20 @@ class Responses {
                     }
                 }
 
-                static final Metadata EMPTY = new Metadata(0, null, null, null);
+                static final Metadata EMPTY = new Metadata(0, null, null, null, AsyncPagingParams.NONE);
 
                 final int columnCount;
                 final ColumnDefinitions columns; // Can be null if no metadata was asked by the query
                 final ByteBuffer pagingState;
                 final int[] pkIndices;
+                final AsyncPagingParams asyncPagingParams;
 
-                private Metadata(int columnCount, ColumnDefinitions columns, ByteBuffer pagingState, int[] pkIndices) {
+                private Metadata(int columnCount, ColumnDefinitions columns, ByteBuffer pagingState, int[] pkIndices, AsyncPagingParams asyncPagingParams) {
                     this.columnCount = columnCount;
                     this.columns = columns;
                     this.pagingState = pagingState;
                     this.pkIndices = pkIndices;
+                    this.asyncPagingParams = asyncPagingParams;
                 }
 
                 static Metadata decode(ByteBuf body, ProtocolVersion protocolVersion, CodecRegistry codecRegistry) {
@@ -392,7 +397,7 @@ class Responses {
                         state = CBUtil.readValue(body);
 
                     if (flags.contains(Flag.NO_METADATA))
-                        return new Metadata(columnCount, null, state, pkIndices);
+                        return new Metadata(columnCount, null, state, pkIndices, asyncPagingParams(flags, body, protocolVersion));
 
                     boolean globalTablesSpec = flags.contains(Flag.GLOBAL_TABLES_SPEC);
 
@@ -413,7 +418,12 @@ class Responses {
                         defs[i] = new ColumnDefinitions.Definition(ksName, cfName, name, type);
                     }
 
-                    return new Metadata(columnCount, new ColumnDefinitions(defs, codecRegistry), state, pkIndices);
+                    return new Metadata(columnCount, new ColumnDefinitions(defs, codecRegistry), state, pkIndices,
+                            asyncPagingParams(flags, body, protocolVersion));
+                }
+
+                static AsyncPagingParams asyncPagingParams(EnumSet<Flag> flags, ByteBuf body, ProtocolVersion protocolVersion) {
+                    return flags.contains(Flag.WITH_ASYNC_PAGING) ? AsyncPagingParams.decode(body, protocolVersion) : AsyncPagingParams.NONE;
                 }
 
                 @Override
@@ -433,6 +443,39 @@ class Responses {
                     return sb.toString();
                 }
             }
+
+            static class AsyncPagingParams
+            {
+                private static final UUID NO_ASYNC_PAGING = new UUID(0, 0);
+                public static AsyncPagingParams NONE = new AsyncPagingParams(NO_ASYNC_PAGING, -1, false);
+
+                final UUID uuid;
+                final int seqNo;
+                final boolean last;
+
+                AsyncPagingParams(UUID uuid, int seqNo, boolean last)
+                {
+                    this.uuid = uuid;
+                    this.seqNo = seqNo;
+                    this.last = last;
+                }
+
+                static AsyncPagingParams decode(ByteBuf body, ProtocolVersion protocolVersion)
+                {
+                    return new AsyncPagingParams(CBUtil.readUUID(body), body.readInt(), body.readBoolean());
+                }
+
+                @Override
+                public String toString()
+                {
+                    return String.format("%s - no. %d%s", uuid, seqNo, last ? " final" : "");
+                }
+
+                boolean dataAvailable() {
+                    return !uuid.equals(NO_ASYNC_PAGING);
+                }
+            }
+
 
             static final Message.Decoder<Result> subcodec = new Message.Decoder<Result>() {
                 @Override

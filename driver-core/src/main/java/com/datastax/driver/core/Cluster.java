@@ -1342,6 +1342,10 @@ public class Cluster implements Closeable {
         EventDebouncer<NodeRefreshRequest> nodeRefreshRequestDebouncer;
         EventDebouncer<SchemaRefreshRequest> schemaRefreshRequestDebouncer;
 
+        // Map async paging unique identifiers to their callbacks for data that is pushed by the server
+        // asynchronously in response to an async paging request
+        ConcurrentMap<UUID, AsyncRequestHandlerCallback> asyncHandlers;
+
         private Manager(String clusterName, List<InetSocketAddress> contactPoints, Configuration configuration, Collection<Host.StateListener> listeners) {
             this.clusterName = clusterName == null ? generateClusterName() : clusterName;
             this.configuration = configuration;
@@ -1376,6 +1380,7 @@ public class Cluster implements Closeable {
             this.controlConnection = new ControlConnection(this);
             this.metrics = configuration.getMetricsOptions().isEnabled() ? new Metrics(this) : null;
             this.preparedQueries = new MapMaker().weakValues().makeMap();
+            this.asyncHandlers = new MapMaker().weakValues().makeMap();
 
             // create debouncers - at this stage, they are not running yet
             QueryOptions queryOptions = configuration.getQueryOptions();
@@ -2299,6 +2304,12 @@ public class Cluster implements Closeable {
         @Override
         public void handle(Message.Response response) {
 
+            if (response instanceof Responses.Result.Rows) {
+                Responses.Result.Rows rows = (Responses.Result.Rows)response;
+                if (handleStreamingResults(rows))
+                    return;
+            }
+
             if (!(response instanceof Responses.Event)) {
                 logger.error("Received an unexpected message from the server: {}", response);
                 return;
@@ -2430,6 +2441,31 @@ public class Cluster implements Closeable {
                     }
                     break;
             }
+        }
+
+        public boolean addAsyncHandler(AsyncRequestHandlerCallback cb)
+        {
+            return asyncHandlers.putIfAbsent(cb.asyncId(), cb) == null;
+        }
+
+        /**
+         * Handle data streamed by the server
+         * @param rows
+         */
+        private boolean handleStreamingResults(Responses.Result.Rows rows)
+        {
+            if (!rows.metadata.asyncPagingParams.dataAvailable())
+                return false;
+
+            if (logger.isTraceEnabled())
+                logger.trace("Received async result {}", rows.metadata.asyncPagingParams);
+
+            AsyncRequestHandlerCallback cb = asyncHandlers.get(rows.metadata.asyncPagingParams.uuid);
+            if (cb == null)
+                return false;
+
+            cb.onData(rows);
+            return true;
         }
 
         void refreshConnectedHosts() {

@@ -75,10 +75,9 @@ class RequestHandler {
 
         callback.register(this);
 
-        this.queryPlan = new QueryPlan(callback.request().getPreferredHost(),
-                                       manager.loadBalancingPolicy().newQueryPlan(manager.poolsState.keyspace, statement));
+        this.queryPlan = new QueryPlan(manager.loadBalancingPolicy().newQueryPlan(manager.poolsState.keyspace, statement));
         this.speculativeExecutionPlan = manager.speculativeExecutionPolicy().newPlan(manager.poolsState.keyspace, statement);
-        this.allowSpeculativeExecutions = statement != Statement.DEFAULT && !statement.getOptimizeQuery()
+        this.allowSpeculativeExecutions = statement != Statement.DEFAULT
                 && statement.isIdempotentWithDefault(manager.configuration().getQueryOptions());
         this.statement = statement;
 
@@ -87,6 +86,24 @@ class RequestHandler {
                 : null;
         this.startTime = System.nanoTime();
     }
+
+    public Statement statement() {
+        return statement;
+    }
+
+    public SessionManager manager() {
+        return manager;
+    }
+
+    public ExecutionInfo executionInfo() {
+        String id = RequestHandler.this.id + "-" + executionCount.get();
+        for (SpeculativeExecution info : runningExecutions) {
+            if (info.id.equals(id) && info.current != null)
+                return info.current.defaultExecutionInfo;
+        }
+        return null;
+    }
+
 
     void sendRequest() {
         startNewExecution();
@@ -146,12 +163,10 @@ class RequestHandler {
     }
 
     private void setFinalResult(SpeculativeExecution execution, Connection connection, Message.Response response) {
-        if (!response.isMultiPart()) {
-            if (!isDone.compareAndSet(false, true)) {
-                if (logger.isTraceEnabled())
-                    logger.trace("[{}] Got beaten to setting the result", execution.id);
-                return;
-            }
+        if (!isDone.compareAndSet(false, true)) {
+            if (logger.isTraceEnabled())
+                logger.trace("[{}] Got beaten to setting the result", execution.id);
+            return;
         }
 
         if (logger.isTraceEnabled())
@@ -450,13 +465,11 @@ class RequestHandler {
         @Override
         public void onSet(Connection connection, Message.Response response, long latency, int retryCount) {
             QueryState queryState = queryStateRef.get();
-            if (!response.isMultiPart()) {
-                if (!queryState.isInProgressAt(retryCount) ||
-                        !queryStateRef.compareAndSet(queryState, queryState.complete())) {
-                    logger.debug("onSet triggered but the response was completed by another thread, cancelling (retryCount = {}, queryState = {}, queryStateRef = {})",
-                            retryCount, queryState, queryStateRef.get());
-                    return;
-                }
+            if (!queryState.isInProgressAt(retryCount) ||
+                    !queryStateRef.compareAndSet(queryState, queryState.complete())) {
+                logger.debug("onSet triggered but the response was completed by another thread, cancelling (retryCount = {}, queryState = {}, queryStateRef = {})",
+                        retryCount, queryState, queryStateRef.get());
+                return;
             }
 
             Host queriedHost = current;
@@ -464,8 +477,7 @@ class RequestHandler {
             try {
                 switch (response.type) {
                     case RESULT:
-                        if (!response.isMultiPart())
-                            connection.release();
+                        connection.release();
                         setFinalResult(connection, response);
                         break;
                     case ERROR:
@@ -842,34 +854,20 @@ class RequestHandler {
 
     /**
      * Wraps the iterator return by {@link com.datastax.driver.core.policies.LoadBalancingPolicy} to make it safe for
-     * concurrent access by multiple threads. Returns the preferred host first, if it is not null.
+     * concurrent access by multiple threads.
      */
     static class QueryPlan {
-        private final Host preferedHost;
         private final Iterator<Host> iterator;
-        private boolean preferredReturned;
 
-        QueryPlan(Host preferredHost, Iterator<Host> iterator) {
-            this.preferedHost = preferredHost;
+        QueryPlan(Iterator<Host> iterator) {
             this.iterator = iterator;
         }
 
         /**
-         * @return the next host to query, null if there are no more hosts
+         * @return null if there are no more hosts
          */
         synchronized Host next() {
-            if (preferedHost != null && !preferredReturned) {
-                preferredReturned = true;
-                return preferedHost;
-            }
-
-            while (iterator.hasNext()) {
-                Host ret = iterator.next();
-                if (preferedHost == null || !ret.equals(preferedHost))
-                    return ret;
-            }
-
-            return null;
+            return iterator.hasNext() ? iterator.next() : null;
         }
     }
 }

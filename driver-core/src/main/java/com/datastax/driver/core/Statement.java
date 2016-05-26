@@ -62,8 +62,6 @@ public abstract class Statement {
     private volatile ConsistencyLevel consistency;
     private volatile ConsistencyLevel serialConsistency;
     private volatile boolean traceQuery;
-    private volatile boolean optimizeQuery;
-    private volatile boolean isStreaming;
     private volatile int fetchSize;
     private volatile long defaultTimestamp = Long.MIN_VALUE;
     private volatile int readTimeoutMillis = Integer.MIN_VALUE;
@@ -176,57 +174,6 @@ public abstract class Statement {
      */
     public boolean isTracing() {
         return traceQuery;
-    }
-
-
-    /**
-     * Enables optimization for this query.
-     * <p/>
-     * When set to true, this flag indicates that the client intends to
-     * retrieve the query result in its entirety and as quickly as possible.
-     * The driver will address all page requests to the same replica, which in
-     * turn will keep they query open and pre-fetch page results as long as
-     * it is safe to do so. This flag is only a hint, optimizations of queries
-     * is only possible for local data requested at Consistency Level One
-     * without any read repair.
-     *
-     * @param optimize  whether to optimize this query
-     * @return this {@code Statement} object.
-     */
-    public Statement optimizeQuery(boolean optimize) {
-        this.optimizeQuery = optimize;
-        return this;
-    }
-
-    /**
-     * @return whether this query should be optimized
-     */
-    public boolean getOptimizeQuery() {
-        return this.optimizeQuery;
-    }
-
-    /**
-     * Request streaming of data. When querying partitions
-     * that are local to the host and with consistency level set to ONE,
-     * as typically done by analytics tools, the entire data set will be streamed
-     * in multiple responses. This will result in the callback being invoked multiple
-     * times without the need to fetch pages manually.
-     * @return this statement.
-     */
-    public Statement requestStreaming() {
-        isStreaming = true;
-        return this;
-    }
-
-    /**
-     * Return whether multi-part results should be streamed for this query or not.
-     * Currently only supported for select statements in limited cases, @see {@code }Select.requestStreaming}.
-     *
-     * @return {@code true} if streaming was requested for this statement, {@code false}
-     * otherwise.
-     */
-    public boolean isStreaming() {
-        return isStreaming;
     }
 
     /**

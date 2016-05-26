@@ -59,7 +59,19 @@
     <difference>
         <className>com/datastax/driver/core/Session</className>
         <differenceType>7012</differenceType> <!-- method added to interface -->
-        <method>java.util.Iterator stream(com.datastax.driver.core.Statement)</method>
+        <method>com.datastax.driver.core.ResultSetIterator executeAsync(com.datastax.driver.core.Statement, com.datastax.driver.core.AsyncPagingOptions)</method>
+    </difference>
+
+    <difference>
+        <className>com/datastax/driver/core/ResultSet</className>
+        <differenceType>7012</differenceType> <!-- method added to interface -->
+        <method>com.datastax.driver.core.AsyncPagingOptions pagingOptions()</method>
+    </difference>
+
+    <difference>
+        <className>com/datastax/driver/core/ResultSet</className>
+        <differenceType>7012</differenceType> <!-- method added to interface -->
+        <method>com.datastax.driver.core.ResultSetIterator fetchRemainingResults()</method>
     </difference>
 
     <difference>
@@ -72,18 +84,6 @@
         <className>com/datastax/driver/core/Statement</className>
         <differenceType>7012</differenceType> <!-- method added to class -->
         <method>void setRoutingTokenRange(com.datastax.driver.core.TokenRange)</method>
-    </difference>
-
-    <difference>
-        <className>com/datastax/driver/core/Statement</className>
-        <differenceType>7012</differenceType> <!-- method added to class -->
-        <method>Statement optimizeQuery(boolean optimize)</method>
-    </difference>
-
-    <difference>
-        <className>com/datastax/driver/core/Statement</className>
-        <differenceType>7012</differenceType> <!-- method added to class -->
-        <method>boolean getOptimizeQuery()</method>
     </difference>
 
 </differences>
