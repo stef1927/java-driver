@@ -18,7 +18,8 @@ package com.datastax.driver.core;
 import com.datastax.driver.core.Responses.Result.Rows.Metadata;
 import com.datastax.driver.core.exceptions.*;
 import com.datastax.driver.core.utils.Bytes;
-import io.netty.buffer.ByteBuf;
+import com.google.common.collect.AbstractIterator;
+import io.netty.buffer.*;
 
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -329,7 +330,7 @@ class Responses {
 
         static class Rows extends Result {
 
-            static final Rows EMPTY = new Rows(Metadata.EMPTY, new ArrayDeque<List<ByteBuffer>>(0), ProtocolVersion.NEWEST_SUPPORTED);
+            static final Rows EMPTY = new Rows(Metadata.EMPTY, 0, Unpooled.EMPTY_BUFFER, ProtocolVersion.NEWEST_SUPPORTED);
 
             static class Metadata {
 
@@ -476,7 +477,6 @@ class Responses {
                 }
             }
 
-
             static final Message.Decoder<Result> subcodec = new Message.Decoder<Result>() {
                 @Override
                 public Result decode(ByteBuf body, ProtocolVersion version, CodecRegistry codecRegistry) {
@@ -484,36 +484,91 @@ class Responses {
                     Metadata metadata = Metadata.decode(body, version, codecRegistry);
 
                     int rowCount = body.readInt();
-                    int columnCount = metadata.columnCount;
-
-                    Queue<List<ByteBuffer>> data = new ArrayDeque<List<ByteBuffer>>(rowCount);
-                    for (int i = 0; i < rowCount; i++) {
-                        List<ByteBuffer> row = new ArrayList<ByteBuffer>(columnCount);
-                        for (int j = 0; j < columnCount; j++)
-                            row.add(CBUtil.readValue(body));
-                        data.add(row);
-                    }
-
-                    return new Rows(metadata, data, version);
+                    // the remaining data contains the row content, let's not decode it here though,
+                    // so that all the intermediate BBs are more short lived and hopefully won't get
+                    // promoted to the old gen. Unfortunately, we need to copy the buffer because
+                    // result sets are not closeable and I don't want to reply to phantom references
+                    // to return the buffers to the Netty pool, a slice() with a retain() would have
+                    // avoided the copy but we somehow need to return it to the pool
+                    ByteBuf data = Unpooled.copiedBuffer(body);
+                    return new Rows(metadata, rowCount, data, version);
                 }
             };
 
+            static final class RowIterator implements Iterator<List<ByteBuffer>>
+            {
+                private final int rowCount;
+                private final int columnCount;
+                private final ByteBuf data;
+                private int current;
+
+                RowIterator(Rows parent)
+                {
+                    this.rowCount = parent.rowCount;
+                    this.columnCount = parent.metadata.columnCount;
+                    this.data = parent.data.duplicate();
+                    this.current = 0;
+                }
+
+                @Override
+                public boolean hasNext() {
+                    return remaining() > 0;
+                }
+
+                @Override
+                public List<ByteBuffer> next() {
+                    if (current == rowCount)
+                        return null;
+
+                    List<ByteBuffer> ret = new ArrayList<ByteBuffer>(columnCount);
+                    for (int j = 0; j < columnCount; j++)
+                        ret.add(CBUtil.readValue(data));
+
+                    current++;
+                    return ret;
+                }
+
+                public List<ByteBuffer> one()
+                {
+                    return hasNext() ? next() : null;
+                }
+
+                public int remaining()
+                {
+                    return rowCount - current;
+                }
+
+                public boolean isEmpty()
+                {
+                    return !hasNext();
+                }
+            }
+
             final Metadata metadata;
-            final Queue<List<ByteBuffer>> data;
+            final ByteBuf data;
+            final int rowCount;
             private final ProtocolVersion version;
 
-            private Rows(Metadata metadata, Queue<List<ByteBuffer>> data, ProtocolVersion version) {
+            private Rows(Metadata metadata, int rowCount, ByteBuf data, ProtocolVersion version) {
                 super(Kind.ROWS);
                 this.metadata = metadata;
+                this.rowCount = rowCount;
                 this.data = data;
                 this.version = version;
+            }
+
+            public RowIterator rowIterator()
+            {
+               return new RowIterator(this);
             }
 
             @Override
             public String toString() {
                 StringBuilder sb = new StringBuilder();
                 sb.append("ROWS ").append(metadata).append('\n');
-                for (List<ByteBuffer> row : data) {
+                Iterator<List<ByteBuffer>> it = rowIterator();
+                while(it.hasNext()) {
+                    List<ByteBuffer> row = it.next();
                     for (int i = 0; i < row.size(); i++) {
                         ByteBuffer v = row.get(i);
                         if (v == null) {

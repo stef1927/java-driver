@@ -176,7 +176,7 @@ abstract class ArrayBackedResultSet implements ResultSet {
 
     private static class SinglePage extends ArrayBackedResultSet {
 
-        private final Queue<List<ByteBuffer>> rows;
+        private final Responses.Result.Rows.RowIterator rows;
         private final ExecutionInfo info;
 
         private SinglePage(ColumnDefinitions metadata,
@@ -186,9 +186,9 @@ abstract class ArrayBackedResultSet implements ResultSet {
                            Responses.Result.Rows msg,
                            ExecutionInfo info,
                            AsyncPagingOptions pagingOptions) {
-            super(metadata, tokenFactory, msg.data.peek(), protocolVersion, codecRegistry, pagingOptions);
+            super(metadata, tokenFactory, msg.rowIterator().one(), protocolVersion, codecRegistry, pagingOptions);
             this.info = info;
-            this.rows = msg.data;
+            this.rows = msg.rowIterator();
         }
 
         @Override
@@ -198,12 +198,12 @@ abstract class ArrayBackedResultSet implements ResultSet {
 
         @Override
         public Row one() {
-            return ArrayBackedRow.fromData(metadata, tokenFactory, protocolVersion, rows.poll());
+            return ArrayBackedRow.fromData(metadata, tokenFactory, protocolVersion, rows.one());
         }
 
         @Override
         public int getAvailableWithoutFetching() {
-            return rows.size();
+            return rows.remaining();
         }
 
         @Override
@@ -234,8 +234,8 @@ abstract class ArrayBackedResultSet implements ResultSet {
 
     private static class MultiPage extends ArrayBackedResultSet {
 
-        private Queue<List<ByteBuffer>> currentPage;
-        private final Queue<Queue<List<ByteBuffer>>> nextPages = new ConcurrentLinkedQueue<Queue<List<ByteBuffer>>>();
+        private Responses.Result.Rows.RowIterator currentPage;
+        private final Queue<Responses.Result.Rows.RowIterator> nextPages = new ConcurrentLinkedQueue<Responses.Result.Rows.RowIterator>();
 
         private final Deque<ExecutionInfo> infos = new LinkedBlockingDeque<ExecutionInfo>();
 
@@ -268,8 +268,8 @@ abstract class ArrayBackedResultSet implements ResultSet {
             // Note: as of Cassandra 2.1.0, it turns out that the result of a CAS update is never paged, so
             // we could hard-code the result of wasApplied in this class to "true". However, we can not be sure
             // that this will never change, so apply the generic check by peeking at the first row.
-            super(metadata, tokenFactory, msg.data.peek(), protocolVersion, codecRegistry, pagingOptions);
-            this.currentPage = msg.data;
+            super(metadata, tokenFactory, msg.rowIterator().one(), protocolVersion, codecRegistry, pagingOptions);
+            this.currentPage = msg.rowIterator();
             this.infos.offer(info);
 
             this.fetchState = new FetchingState(msg.metadata.pagingState, null);
@@ -285,14 +285,14 @@ abstract class ArrayBackedResultSet implements ResultSet {
         @Override
         public Row one() {
             prepareNextRow();
-            return ArrayBackedRow.fromData(metadata, tokenFactory, protocolVersion, currentPage.poll());
+            return ArrayBackedRow.fromData(metadata, tokenFactory, protocolVersion, currentPage.one());
         }
 
         @Override
         public int getAvailableWithoutFetching() {
-            int available = currentPage.size();
-            for (Queue<List<ByteBuffer>> page : nextPages)
-                available += page.size();
+            int available = currentPage.remaining();
+            for (Responses.Result.Rows.RowIterator page : nextPages)
+                available += page.remaining();
             return available;
         }
 
@@ -308,7 +308,7 @@ abstract class ArrayBackedResultSet implements ResultSet {
                 // Grab the current state now to get a consistent view in this iteration.
                 FetchingState fetchingState = this.fetchState;
 
-                Queue<List<ByteBuffer>> nextPage = nextPages.poll();
+                Responses.Result.Rows.RowIterator nextPage = nextPages.poll();
                 if (nextPage != null) {
                     currentPage = nextPage;
                     continue;
@@ -371,7 +371,7 @@ abstract class ArrayBackedResultSet implements ResultSet {
                                 if (rm.kind == Responses.Result.Kind.ROWS) {
                                     Responses.Result.Rows rows = (Responses.Result.Rows) rm;
                                     info = update(info, rm, MultiPage.this.session, rows.metadata.pagingState, protocolVersion, codecRegistry, statement);
-                                    MultiPage.this.nextPages.offer(rows.data);
+                                    MultiPage.this.nextPages.offer(rows.rowIterator());
                                     MultiPage.this.fetchState = rows.metadata.pagingState == null ? null : new FetchingState(rows.metadata.pagingState, null);
                                 } else if (rm.kind == Responses.Result.Kind.VOID) {
                                     // We shouldn't really get a VOID message here but well, no harm in handling it I suppose
@@ -440,7 +440,7 @@ abstract class ArrayBackedResultSet implements ResultSet {
             Statement statement = this.infos.peek().getStatement();
             assert !(statement instanceof BatchStatement);
 
-            final PriorityBlockingQueue<AsyncRequestHandlerCallback.Result> queue = new PriorityBlockingQueue<AsyncRequestHandlerCallback.Result>();
+            final AsyncResultSetIterator.ResultQueue queue = new AsyncResultSetIterator.ResultQueue(statement, session.cluster);
             final AsyncPagingOptions nextPagingOptions = pagingOptions.withNewId();
 
             final AsyncRequestHandlerCallback cb = new AsyncRequestHandlerCallback(queue, session, session.cluster.manager,
@@ -448,7 +448,7 @@ abstract class ArrayBackedResultSet implements ResultSet {
 
             new RequestHandler(session, cb, statement).sendRequest();
 
-            return new AsyncResultSetIterator(cb, statement, session.cluster, queue);
+            return new AsyncResultSetIterator(cb, queue);
         }
 
         @Override

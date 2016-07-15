@@ -149,7 +149,7 @@ class SessionManager extends AbstractSession {
     @Override
     public ResultSetIterator executeAsync(final Statement statement, final AsyncPagingOptions pagingOptions)
     {
-        final PriorityBlockingQueue<AsyncRequestHandlerCallback.Result> queue = new PriorityBlockingQueue<AsyncRequestHandlerCallback.Result>();
+        final AsyncResultSetIterator.ResultQueue queue = new AsyncResultSetIterator.ResultQueue(statement, cluster);
         final AsyncRequestHandlerCallback cb = new AsyncRequestHandlerCallback(queue, this, cluster.manager,
                 makeRequestMessage(statement, null, pagingOptions), pagingOptions);
 
@@ -165,7 +165,7 @@ class SessionManager extends AbstractSession {
             }, executor());
         }
 
-        return new AsyncResultSetIterator(cb, statement, cluster, queue);
+        return new AsyncResultSetIterator(cb, queue);
     }
 
     @Override

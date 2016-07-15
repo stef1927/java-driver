@@ -18,7 +18,8 @@ package com.datastax.driver.core;
 import com.google.common.collect.AbstractIterator;
 
 /**
- * An iterator over ResultSet objects, that must be closed.
+ * An iterator over ResultSet objects, that must be closed. This iterator is not thread safe,
+ * it must be called from a single thread or synchronized.
  */
 public abstract class ResultSetIterator extends AbstractIterator<ResultSet> implements AutoCloseable {
 

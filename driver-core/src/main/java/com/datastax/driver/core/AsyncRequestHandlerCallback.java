@@ -16,19 +16,14 @@
 package com.datastax.driver.core;
 
 import com.datastax.driver.core.exceptions.*;
-import com.datastax.driver.core.utils.MoreFutures;
 import com.google.common.util.concurrent.AsyncFunction;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.MoreExecutors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.UUID;
 import java.util.concurrent.*;
-
-import static com.datastax.driver.core.Message.Response.Type.ERROR;
-
 
 /**
  * A request handler callback that receives multiple results asynchronously and pushes them to a queue that is
@@ -36,12 +31,9 @@ import static com.datastax.driver.core.Message.Response.Type.ERROR;
  */
 class AsyncRequestHandlerCallback implements RequestHandler.Callback {
 
-    private static final int MAX_QUEUE_SIZE = 10; // Maximum number of items on the queue before we block the netty IO thread
-    private static final int ON_QUEUE_FULL_SLEEP_MILLIS = 1; // Amount of time we block for if the queue is full
-
     private static final Logger logger = LoggerFactory.getLogger(AsyncRequestHandlerCallback.class);
 
-    private final PriorityBlockingQueue<Result> queue;
+    private final AsyncResultSetIterator.ResultQueue queue;
     private final SessionManager session;
     private final ProtocolVersion protocolVersion;
     private final Message.Request request;
@@ -49,7 +41,7 @@ class AsyncRequestHandlerCallback implements RequestHandler.Callback {
     private RequestHandler handler;
     private volatile boolean stopped;
 
-    AsyncRequestHandlerCallback(PriorityBlockingQueue<Result> queue,
+    AsyncRequestHandlerCallback(AsyncResultSetIterator.ResultQueue queue,
                                 SessionManager session,
                                 Cluster.Manager manager,
                                 Message.Request request,
@@ -111,7 +103,8 @@ class AsyncRequestHandlerCallback implements RequestHandler.Callback {
 
     public void onData(Responses.Result.Rows rows) {
         ResultSet resultSet = ArrayBackedResultSet.fromMessage(rows, session, protocolVersion, handler.executionInfo(), handler.statement(), asyncPagingOptions);
-        sendResult(new Result(resultSet, rows.metadata.asyncPagingParams));
+        if (!stopped)
+            queue.put(resultSet, rows.metadata.asyncPagingParams);
     }
 
     /** Stop sending results to the queue */
@@ -185,32 +178,8 @@ class AsyncRequestHandlerCallback implements RequestHandler.Callback {
 
     private void setException(Exception ex)
     {
-        sendResult(new Result(ex));
-    }
-
-    private void sendResult(Result result)
-    {
-        try {
-            if (logger.isTraceEnabled())
-                logger.trace("Sending result {}", result);
-
-            // we may process messages out of sequence if another thread goes ahead but the server will
-            // send them in sequence, so if our message is not the smallest message in the queue it is safe to block
-            // until the size of the queue is smaller or our message is the smallest
-            while(!stopped && queue.size() > MAX_QUEUE_SIZE) {
-                Result lowest = queue.peek();
-                // need to check on != null due to a possible race
-                if (lowest != null && result.seqNo > lowest.seqNo) {
-                    Thread.sleep(ON_QUEUE_FULL_SLEEP_MILLIS);
-                }
-            }
-
-            if (!stopped)
-                queue.put(result);
-        }
-        catch (Exception ex) {
-            logger.error("Failed to report result {} due to interrupted exception", result, ex);
-        }
+        if (!stopped)
+            queue.put(ex);
     }
 
     @Override
@@ -238,37 +207,5 @@ class AsyncRequestHandlerCallback implements RequestHandler.Callback {
         // This is only called for internal calls (i.e, when the future is not wrapped in RequestHandler).
         // There is no retry logic in that case, so the value does not really matter.
         return 0;
-    }
-
-    public final static class Result implements Comparable<Result> {
-        public final ResultSet resultSet; // can be null
-        public final Exception exception; // can be null
-        public final int seqNo;
-        public final boolean last;
-
-        public Result(ResultSet resultSet, Responses.Result.Rows.AsyncPagingParams params) {
-            this(resultSet, null, params.seqNo, params.last);
-        }
-
-        public Result(Exception exception) {
-            this (null, exception, 0, true);
-        }
-
-        private Result(ResultSet resultSet, Exception exception, int seqNo, boolean last) {
-            this.resultSet = resultSet;
-            this.exception = exception;
-            this.seqNo = seqNo;
-            this.last = last;
-        }
-
-        @Override
-        public int compareTo(Result that) {
-            return this.seqNo == that.seqNo ? 0 : this.seqNo < that.seqNo ? -1 : 1;
-        }
-
-        @Override
-        public String toString() {
-            return String.format("%s - %d%s", resultSet, seqNo, last ? " final" : "");
-        }
     }
 }
