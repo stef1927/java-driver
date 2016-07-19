@@ -22,7 +22,6 @@ import com.google.common.util.concurrent.ListenableFuture;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.UUID;
 import java.util.concurrent.*;
 
 /**
@@ -33,33 +32,25 @@ class AsyncRequestHandlerCallback implements RequestHandler.Callback {
 
     private static final Logger logger = LoggerFactory.getLogger(AsyncRequestHandlerCallback.class);
 
-    private final AsyncResultSetIterator.ResultQueue queue;
-    private final SessionManager session;
-    private final ProtocolVersion protocolVersion;
+    private final RowIteratorImpl.PageQueue queue;
     private final Message.Request request;
     private final AsyncPagingOptions asyncPagingOptions;
     private RequestHandler handler;
     private volatile boolean stopped;
 
-    AsyncRequestHandlerCallback(AsyncResultSetIterator.ResultQueue queue,
-                                SessionManager session,
+    AsyncRequestHandlerCallback(RowIteratorImpl.PageQueue queue,
                                 Cluster.Manager manager,
                                 Message.Request request,
                                 AsyncPagingOptions asyncPagingOptions) {
         this.queue = queue;
-        this.session = session;
-        this.protocolVersion = manager.protocolVersion();
         this.request = request;
         this.asyncPagingOptions = asyncPagingOptions;
 
         manager.addAsyncHandler(this);
     }
 
-    /**
-     * @return the unique identifier for the async session
-     */
-    public UUID asyncId() {
-        return asyncPagingOptions.id;
+    AsyncPagingOptions pagingOptions() {
+        return asyncPagingOptions;
     }
 
     @Override
@@ -101,10 +92,9 @@ class AsyncRequestHandlerCallback implements RequestHandler.Callback {
         }
     }
 
-    public void onData(Responses.Result.Rows rows) {
-        ResultSet resultSet = ArrayBackedResultSet.fromMessage(rows, session, protocolVersion, handler.executionInfo(), handler.statement(), asyncPagingOptions);
+    void onData(Responses.Result.Rows rows) {
         if (!stopped)
-            queue.put(resultSet, rows.metadata.asyncPagingParams);
+            queue.put(rows);
     }
 
     /** Stop sending results to the queue */
@@ -114,7 +104,8 @@ class AsyncRequestHandlerCallback implements RequestHandler.Callback {
         final ListenableFuture<Boolean> fut = sendCancelRequest();
         try {
             boolean ret = fut.get();
-            logger.info("Cancellation request for {} {}", asyncPagingOptions.id, ret ? "succeeded" : "failed");
+            if (logger.isTraceEnabled())
+                logger.trace("Cancellation request for {} {}", asyncPagingOptions.id, ret ? "succeeded" : "failed");
         }
         catch (Exception ex)
         {
@@ -150,13 +141,15 @@ class AsyncRequestHandlerCallback implements RequestHandler.Callback {
         try {
             final PoolingOptions poolingOptions = handler.manager().configuration().getPoolingOptions();
             final Connection connection = currentPool.borrowConnection(poolingOptions.getPoolTimeoutMillis(), TimeUnit.MILLISECONDS);
-            logger.debug("Sending cancellation request for {} to {}", asyncPagingOptions.id, host);
+            if (logger.isTraceEnabled())
+                logger.trace("Sending cancellation request for {} to {}", asyncPagingOptions.id, host);
             Connection.Future startupResponseFuture = connection.write(Requests.Cancel.asyncPaging(asyncPagingOptions.id));
             return Futures.transform(startupResponseFuture, new AsyncFunction<Message.Response, Boolean>() {
                 @Override
                 public ListenableFuture<Boolean> apply(Message.Response response) throws Exception {
                     try {
-                        logger.debug("Cancellation request for {} received {}", asyncPagingOptions.id, response);
+                        if (logger.isTraceEnabled())
+                            logger.trace("Cancellation request for {} received {}", asyncPagingOptions.id, response);
                         if (response instanceof Responses.Result.Void) {
                             return Futures.immediateFuture(true);
                         } else {

@@ -2445,7 +2445,7 @@ public class Cluster implements Closeable {
 
         public boolean addAsyncHandler(AsyncRequestHandlerCallback cb)
         {
-            return asyncHandlers.putIfAbsent(cb.asyncId(), cb) == null;
+            return asyncHandlers.putIfAbsent(cb.pagingOptions().id, cb) == null;
         }
 
         /**

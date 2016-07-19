@@ -26,6 +26,7 @@ import io.netty.util.AttributeKey;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.Closeable;
 import java.nio.ByteBuffer;
 import java.util.*;
 
@@ -199,7 +200,7 @@ abstract class Message {
         }
     }
 
-    static abstract class Response extends Message {
+    static abstract class Response extends Message implements Closeable {
 
         enum Type {
             ERROR(0, Responses.Error.decoder),
@@ -263,6 +264,10 @@ abstract class Message {
         Response setWarnings(List<String> warnings) {
             this.warnings = warnings;
             return this;
+        }
+
+        public void close() {
+
         }
     }
 

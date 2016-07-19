@@ -18,9 +18,9 @@ package com.datastax.driver.core;
 import com.datastax.driver.core.Responses.Result.Rows.Metadata;
 import com.datastax.driver.core.exceptions.*;
 import com.datastax.driver.core.utils.Bytes;
-import com.google.common.collect.AbstractIterator;
 import io.netty.buffer.*;
 
+import java.io.Closeable;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.util.*;
@@ -484,18 +484,12 @@ class Responses {
                     Metadata metadata = Metadata.decode(body, version, codecRegistry);
 
                     int rowCount = body.readInt();
-                    // the remaining data contains the row content, let's not decode it here though,
-                    // so that all the intermediate BBs are more short lived and hopefully won't get
-                    // promoted to the old gen. Unfortunately, we need to copy the buffer because
-                    // result sets are not closeable and I don't want to reply to phantom references
-                    // to return the buffers to the Netty pool, a slice() with a retain() would have
-                    // avoided the copy but we somehow need to return it to the pool
-                    ByteBuf data = Unpooled.copiedBuffer(body);
+                    ByteBuf data = body.slice();
                     return new Rows(metadata, rowCount, data, version);
                 }
             };
 
-            static final class RowIterator implements Iterator<List<ByteBuffer>>
+            static final class RowIterator implements Iterator<List<ByteBuffer>>, Closeable
             {
                 private final int rowCount;
                 private final int columnCount;
@@ -506,7 +500,7 @@ class Responses {
                 {
                     this.rowCount = parent.rowCount;
                     this.columnCount = parent.metadata.columnCount;
-                    this.data = parent.data.duplicate();
+                    this.data = parent.data.duplicate().retain();
                     this.current = 0;
                 }
 
@@ -542,6 +536,16 @@ class Responses {
                 {
                     return !hasNext();
                 }
+
+                @Override
+                public void remove() {
+                    throw new UnsupportedOperationException("remove");
+                }
+
+                public void close()
+                {
+                    data.release();
+                }
             }
 
             final Metadata metadata;
@@ -553,47 +557,72 @@ class Responses {
                 super(Kind.ROWS);
                 this.metadata = metadata;
                 this.rowCount = rowCount;
-                this.data = data;
+                this.data = data.retain();
                 this.version = version;
             }
 
-            public RowIterator rowIterator()
+            RowIterator rowIterator()
             {
                return new RowIterator(this);
+            }
+
+            Queue<List<ByteBuffer>> rows()
+            {
+                RowIterator it = new RowIterator(this);
+                try {
+                    Queue<List<ByteBuffer>> data = new ArrayDeque<List<ByteBuffer>>(rowCount);
+                    while(it.hasNext())
+                        data.add(it.next());
+                    return data;
+                }
+                finally {
+                    it.close();
+                }
             }
 
             @Override
             public String toString() {
                 StringBuilder sb = new StringBuilder();
                 sb.append("ROWS ").append(metadata).append('\n');
-                Iterator<List<ByteBuffer>> it = rowIterator();
-                while(it.hasNext()) {
-                    List<ByteBuffer> row = it.next();
-                    for (int i = 0; i < row.size(); i++) {
-                        ByteBuffer v = row.get(i);
-                        if (v == null) {
-                            sb.append(" | null");
-                        } else {
-                            sb.append(" | ");
-                            if (metadata.columns != null) {
-                                DataType dataType = metadata.columns.getType(i);
-                                sb.append(dataType);
-                                sb.append(" ");
-                                TypeCodec<Object> codec = metadata.columns.codecRegistry.codecFor(dataType);
-                                Object o = codec.deserialize(v, version);
-                                String s = codec.format(o);
-                                if (s.length() > 100)
-                                    s = s.substring(0, 100) + "...";
-                                sb.append(s);
+                RowIterator it = rowIterator();
+                try{
+                    while (it.hasNext()) {
+                        List<ByteBuffer> row = it.next();
+                        for (int i = 0; i < row.size(); i++) {
+                            ByteBuffer v = row.get(i);
+                            if (v == null) {
+                                sb.append(" | null");
                             } else {
-                                sb.append(Bytes.toHexString(v));
+                                sb.append(" | ");
+                                if (metadata.columns != null) {
+                                    DataType dataType = metadata.columns.getType(i);
+                                    sb.append(dataType);
+                                    sb.append(" ");
+                                    TypeCodec<Object> codec = metadata.columns.codecRegistry.codecFor(dataType);
+                                    Object o = codec.deserialize(v, version);
+                                    String s = codec.format(o);
+                                    if (s.length() > 100)
+                                        s = s.substring(0, 100) + "...";
+                                    sb.append(s);
+                                } else {
+                                    sb.append(Bytes.toHexString(v));
+                                }
                             }
                         }
+                        sb.append('\n');
                     }
-                    sb.append('\n');
+                }
+                finally {
+                    it.close();
                 }
                 sb.append("---");
                 return sb.toString();
+            }
+
+            @Override
+            public void close()
+            {
+                data.release();
             }
         }
 

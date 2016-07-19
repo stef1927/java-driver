@@ -147,10 +147,10 @@ class SessionManager extends AbstractSession {
     }
 
     @Override
-    public ResultSetIterator executeAsync(final Statement statement, final AsyncPagingOptions pagingOptions)
+    public RowIterator execute(final Statement statement, final AsyncPagingOptions pagingOptions)
     {
-        final AsyncResultSetIterator.ResultQueue queue = new AsyncResultSetIterator.ResultQueue(statement, cluster);
-        final AsyncRequestHandlerCallback cb = new AsyncRequestHandlerCallback(queue, this, cluster.manager,
+        final RowIteratorImpl.PageQueue queue = new RowIteratorImpl.PageQueue(statement, this);
+        final AsyncRequestHandlerCallback cb = new AsyncRequestHandlerCallback(queue, cluster.manager,
                 makeRequestMessage(statement, null, pagingOptions), pagingOptions);
 
         if (isInit) {
@@ -165,7 +165,7 @@ class SessionManager extends AbstractSession {
             }, executor());
         }
 
-        return new AsyncResultSetIterator(cb, queue);
+        return new RowIteratorImpl(cb, queue);
     }
 
     @Override

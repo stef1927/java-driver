@@ -20,7 +20,6 @@ import com.google.common.util.concurrent.ListenableFuture;
 
 import java.util.Iterator;
 import java.util.List;
-import java.util.UUID;
 
 /**
  * The result of a query.
@@ -160,13 +159,6 @@ public interface ResultSet extends Iterable<Row> {
     public ListenableFuture<ResultSet> fetchMoreResults();
 
     /**
-     * Fetch all the remaining pages, if any, according to the specified paging options.
-     *
-     * @return - an iterator of result sets, one per page
-     */
-    public ResultSetIterator fetchRemainingResults();
-
-    /**
      * Returns information on the execution of the last query made for this ResultSet.
      * <p/>
      * Note that in most cases, a ResultSet is fetched with only one query, but large
@@ -219,10 +211,4 @@ public interface ResultSet extends Iterable<Row> {
      * @see <a href="https://issues.apache.org/jira/browse/CASSANDRA-7337">CASSANDRA-7337</a>
      */
     public boolean wasApplied();
-
-    /**
-     * If the result is part of an asynchronous paging session, then return the paging options.
-     * @return the paging options
-     */
-    public AsyncPagingOptions pagingOptions();
 }

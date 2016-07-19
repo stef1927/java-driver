@@ -29,7 +29,6 @@ import java.util.*;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingDeque;
-import java.util.concurrent.PriorityBlockingQueue;
 
 /**
  * Default implementation of a result set, backed by an ArrayDeque of ArrayList.
@@ -38,26 +37,24 @@ abstract class ArrayBackedResultSet implements ResultSet {
 
     private static final Logger logger = LoggerFactory.getLogger(ResultSet.class);
 
+    private static final Queue<List<ByteBuffer>> EMPTY_QUEUE = new ArrayDeque<List<ByteBuffer>>(0);
+
     protected final ColumnDefinitions metadata;
     protected final Token.Factory tokenFactory;
     private final boolean wasApplied;
-    protected final AsyncPagingOptions pagingOptions;
 
     protected final ProtocolVersion protocolVersion;
     protected final CodecRegistry codecRegistry;
 
-    private ArrayBackedResultSet(ColumnDefinitions metadata, Token.Factory tokenFactory, List<ByteBuffer> firstRow,
-                                 ProtocolVersion protocolVersion, CodecRegistry codecRegistry, AsyncPagingOptions pagingOptions) {
+    private ArrayBackedResultSet(ColumnDefinitions metadata, Token.Factory tokenFactory, List<ByteBuffer> firstRow, ProtocolVersion protocolVersion, CodecRegistry codecRegistry) {
         this.metadata = metadata;
         this.protocolVersion = protocolVersion;
         this.codecRegistry = codecRegistry;
         this.tokenFactory = tokenFactory;
         this.wasApplied = checkWasApplied(firstRow, metadata, protocolVersion);
-        this.pagingOptions = pagingOptions;
     }
 
-    static ArrayBackedResultSet fromMessage(Responses.Result msg, SessionManager session, ProtocolVersion protocolVersion,
-                                            ExecutionInfo info, Statement statement, AsyncPagingOptions pagingOptions) {
+    static ArrayBackedResultSet fromMessage(Responses.Result msg, SessionManager session, ProtocolVersion protocolVersion, ExecutionInfo info, Statement statement) {
 
         switch (msg.kind) {
             case ROWS:
@@ -85,8 +82,8 @@ abstract class ArrayBackedResultSet implements ResultSet {
                 assert r.metadata.pagingState == null || info != null;
 
                 return r.metadata.pagingState == null
-                        ? new SinglePage(columnDefs, tokenFactory, protocolVersion, columnDefs.codecRegistry, r, info, pagingOptions)
-                        : new MultiPage(columnDefs, tokenFactory, protocolVersion, columnDefs.codecRegistry, r, info, session, pagingOptions);
+                        ? new SinglePage(columnDefs, tokenFactory, protocolVersion, columnDefs.codecRegistry, r.rows(), info)
+                        : new MultiPage(columnDefs, tokenFactory, protocolVersion, columnDefs.codecRegistry, r.rows(), info, r.metadata.pagingState, session);
 
             case VOID:
             case SET_KEYSPACE:
@@ -116,7 +113,7 @@ abstract class ArrayBackedResultSet implements ResultSet {
 
     private static ArrayBackedResultSet empty(ExecutionInfo info) {
         // We could pass the protocol version but we know we won't need it so passing a bogus value (null)
-        return new SinglePage(ColumnDefinitions.EMPTY, null, null, null, Responses.Result.Rows.EMPTY, info, AsyncPagingOptions.NO_PAGING);
+        return new SinglePage(ColumnDefinitions.EMPTY, null, null, null, EMPTY_QUEUE, info);
     }
 
     @Override
@@ -164,9 +161,6 @@ abstract class ArrayBackedResultSet implements ResultSet {
     }
 
     @Override
-    public AsyncPagingOptions pagingOptions() { return pagingOptions; }
-
-    @Override
     public String toString() {
         StringBuilder sb = new StringBuilder();
         sb.append("ResultSet[ exhausted: ").append(isExhausted());
@@ -176,19 +170,18 @@ abstract class ArrayBackedResultSet implements ResultSet {
 
     private static class SinglePage extends ArrayBackedResultSet {
 
-        private final Responses.Result.Rows.RowIterator rows;
+        private final Queue<List<ByteBuffer>> rows;
         private final ExecutionInfo info;
 
         private SinglePage(ColumnDefinitions metadata,
                            Token.Factory tokenFactory,
                            ProtocolVersion protocolVersion,
                            CodecRegistry codecRegistry,
-                           Responses.Result.Rows msg,
-                           ExecutionInfo info,
-                           AsyncPagingOptions pagingOptions) {
-            super(metadata, tokenFactory, msg.rowIterator().one(), protocolVersion, codecRegistry, pagingOptions);
+                           Queue<List<ByteBuffer>> rows,
+                           ExecutionInfo info) {
+            super(metadata, tokenFactory, rows.peek(), protocolVersion, codecRegistry);
             this.info = info;
-            this.rows = msg.rowIterator();
+            this.rows = rows;
         }
 
         @Override
@@ -198,12 +191,12 @@ abstract class ArrayBackedResultSet implements ResultSet {
 
         @Override
         public Row one() {
-            return ArrayBackedRow.fromData(metadata, tokenFactory, protocolVersion, rows.one());
+            return ArrayBackedRow.fromData(metadata, tokenFactory, protocolVersion, rows.poll());
         }
 
         @Override
         public int getAvailableWithoutFetching() {
-            return rows.remaining();
+            return rows.size();
         }
 
         @Override
@@ -214,11 +207,6 @@ abstract class ArrayBackedResultSet implements ResultSet {
         @Override
         public ListenableFuture<ResultSet> fetchMoreResults() {
             return Futures.<ResultSet>immediateFuture(this);
-        }
-
-        @Override
-        public ResultSetIterator fetchRemainingResults() {
-            return ResultSetIterator.EMPTY;
         }
 
         @Override
@@ -234,8 +222,8 @@ abstract class ArrayBackedResultSet implements ResultSet {
 
     private static class MultiPage extends ArrayBackedResultSet {
 
-        private Responses.Result.Rows.RowIterator currentPage;
-        private final Queue<Responses.Result.Rows.RowIterator> nextPages = new ConcurrentLinkedQueue<Responses.Result.Rows.RowIterator>();
+        private Queue<List<ByteBuffer>> currentPage;
+        private final Queue<Queue<List<ByteBuffer>>> nextPages = new ConcurrentLinkedQueue<Queue<List<ByteBuffer>>>();
 
         private final Deque<ExecutionInfo> infos = new LinkedBlockingDeque<ExecutionInfo>();
 
@@ -260,19 +248,19 @@ abstract class ArrayBackedResultSet implements ResultSet {
                           Token.Factory tokenFactory,
                           ProtocolVersion protocolVersion,
                           CodecRegistry codecRegistry,
-                          Responses.Result.Rows msg,
+                          Queue<List<ByteBuffer>> rows,
                           ExecutionInfo info,
-                          SessionManager session,
-                          AsyncPagingOptions pagingOptions) {
+                          ByteBuffer pagingState,
+                          SessionManager session) {
 
             // Note: as of Cassandra 2.1.0, it turns out that the result of a CAS update is never paged, so
             // we could hard-code the result of wasApplied in this class to "true". However, we can not be sure
             // that this will never change, so apply the generic check by peeking at the first row.
-            super(metadata, tokenFactory, msg.rowIterator().one(), protocolVersion, codecRegistry, pagingOptions);
-            this.currentPage = msg.rowIterator();
+            super(metadata, tokenFactory, rows.peek(), protocolVersion, codecRegistry);
+            this.currentPage = rows;
             this.infos.offer(info);
 
-            this.fetchState = new FetchingState(msg.metadata.pagingState, null);
+            this.fetchState = new FetchingState(pagingState, null);
             this.session = session;
         }
 
@@ -285,14 +273,14 @@ abstract class ArrayBackedResultSet implements ResultSet {
         @Override
         public Row one() {
             prepareNextRow();
-            return ArrayBackedRow.fromData(metadata, tokenFactory, protocolVersion, currentPage.one());
+            return ArrayBackedRow.fromData(metadata, tokenFactory, protocolVersion, currentPage.poll());
         }
 
         @Override
         public int getAvailableWithoutFetching() {
-            int available = currentPage.remaining();
-            for (Responses.Result.Rows.RowIterator page : nextPages)
-                available += page.remaining();
+            int available = currentPage.size();
+            for (Queue<List<ByteBuffer>> page : nextPages)
+                available += page.size();
             return available;
         }
 
@@ -308,7 +296,7 @@ abstract class ArrayBackedResultSet implements ResultSet {
                 // Grab the current state now to get a consistent view in this iteration.
                 FetchingState fetchingState = this.fetchState;
 
-                Responses.Result.Rows.RowIterator nextPage = nextPages.poll();
+                Queue<List<ByteBuffer>> nextPage = nextPages.poll();
                 if (nextPage != null) {
                     currentPage = nextPage;
                     continue;
@@ -348,6 +336,8 @@ abstract class ArrayBackedResultSet implements ResultSet {
         private ListenableFuture<ResultSet> queryNextPage(ByteBuffer nextStart, final SettableFuture<ResultSet> future) {
 
             Statement statement = this.infos.peek().getStatement();
+
+
             assert !(statement instanceof BatchStatement);
 
             final Message.Request request = session.makeRequestMessage(statement, nextStart);
@@ -371,7 +361,7 @@ abstract class ArrayBackedResultSet implements ResultSet {
                                 if (rm.kind == Responses.Result.Kind.ROWS) {
                                     Responses.Result.Rows rows = (Responses.Result.Rows) rm;
                                     info = update(info, rm, MultiPage.this.session, rows.metadata.pagingState, protocolVersion, codecRegistry, statement);
-                                    MultiPage.this.nextPages.offer(rows.rowIterator());
+                                    MultiPage.this.nextPages.offer(rows.rows());
                                     MultiPage.this.fetchState = rows.metadata.pagingState == null ? null : new FetchingState(rows.metadata.pagingState, null);
                                 } else if (rm.kind == Responses.Result.Kind.VOID) {
                                     // We shouldn't really get a VOID message here but well, no harm in handling it I suppose
@@ -429,26 +419,6 @@ abstract class ArrayBackedResultSet implements ResultSet {
             }, statement);
 
             return future;
-        }
-
-        @Override
-        public ResultSetIterator fetchRemainingResults()
-        {
-            if (fetchState == null || fetchState.nextStart == null)
-                return ResultSetIterator.EMPTY;
-
-            Statement statement = this.infos.peek().getStatement();
-            assert !(statement instanceof BatchStatement);
-
-            final AsyncResultSetIterator.ResultQueue queue = new AsyncResultSetIterator.ResultQueue(statement, session.cluster);
-            final AsyncPagingOptions nextPagingOptions = pagingOptions.withNewId();
-
-            final AsyncRequestHandlerCallback cb = new AsyncRequestHandlerCallback(queue, session, session.cluster.manager,
-                    session.makeRequestMessage(statement, fetchState.nextStart, nextPagingOptions), nextPagingOptions);
-
-            new RequestHandler(session, cb, statement).sendRequest();
-
-            return new AsyncResultSetIterator(cb, queue);
         }
 
         @Override

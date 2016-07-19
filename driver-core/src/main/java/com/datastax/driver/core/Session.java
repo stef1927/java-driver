@@ -20,9 +20,7 @@ import com.google.common.util.concurrent.ListenableFuture;
 
 import java.io.Closeable;
 import java.util.Collection;
-import java.util.Iterator;
 import java.util.Map;
-import java.util.UUID;
 
 /**
  * A session holds connections to a Cassandra cluster, allowing it to be queried.
@@ -247,14 +245,15 @@ public interface Session extends Closeable {
     ResultSetFuture executeAsync(Statement statement);
 
     /**
-     * Executes the provided query asynchronously returning an iterator of results, one per page.
+     * Executes the provided query returning an iterator of rows, paging is done internally and possibly
+     * by keeping a session open server side.
      *
      * @param statement the CQL query to execute (that can be any {@code Statement}).
-     * @param asyncPagingOptions options that specify number of pages to retrieve, paging size, paging rate, etc
+     * @param pagingOptions options that specify number of pages to retrieve, paging size, paging rate, etc
      *
-     * @return an iterator of pages containing the results
+     * @return an iterator of rows that must be closed when finished, see {@link RowIterator}
      */
-    ResultSetIterator executeAsync(Statement statement, AsyncPagingOptions pagingOptions);
+    RowIterator execute(Statement statement, AsyncPagingOptions pagingOptions);
 
     /**
      * Prepares the provided query string.
