@@ -51,6 +51,11 @@ class DefaultResultSetFuture extends AbstractFuture<ResultSet> implements Result
     }
 
     @Override
+    public boolean retainConnection(Connection connection) {
+        return false;
+    }
+
+    @Override
     public Message.Request request() {
         return request;
     }

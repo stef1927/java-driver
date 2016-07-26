@@ -37,6 +37,7 @@ class AsyncRequestHandlerCallback implements RequestHandler.Callback {
     private final AsyncPagingOptions asyncPagingOptions;
     private RequestHandler handler;
     private volatile boolean stopped;
+    private Connection connection;
 
     AsyncRequestHandlerCallback(RowIteratorImpl.PageQueue queue,
                                 Cluster.Manager manager,
@@ -56,6 +57,12 @@ class AsyncRequestHandlerCallback implements RequestHandler.Callback {
     @Override
     public void register(RequestHandler handler) {
         this.handler = handler;
+    }
+
+    @Override
+    public boolean retainConnection(Connection connection) {
+        this.connection = connection;
+        return true;
     }
 
     @Override
@@ -113,6 +120,13 @@ class AsyncRequestHandlerCallback implements RequestHandler.Callback {
         }
     }
 
+    public void release() {
+        if (connection != null) {
+            connection.release();
+            connection = null;
+        }
+    }
+
     /**
      * Send a cancel message for this async session so that the server can release resources.
      *
@@ -132,32 +146,29 @@ class AsyncRequestHandlerCallback implements RequestHandler.Callback {
             return Futures.immediateFuture(false);
         }
 
-        HostConnectionPool currentPool = handler.manager().pools.get(host);
-        if (currentPool == null || currentPool.isClosed()) {
-            logger.error("Cannot send cancel request for {}, no connection available", asyncPagingOptions.id);
-            return Futures.immediateFuture(false);
-        }
-
         try {
-            final PoolingOptions poolingOptions = handler.manager().configuration().getPoolingOptions();
-            final Connection connection = currentPool.borrowConnection(poolingOptions.getPoolTimeoutMillis(), TimeUnit.MILLISECONDS);
+            if (connection == null) {
+                final PoolingOptions poolingOptions = handler.manager().configuration().getPoolingOptions();
+                HostConnectionPool currentPool = handler.manager().pools.get(host);
+                if (currentPool == null || currentPool.isClosed()) {
+                    logger.error("Cannot send cancel request for {}, no connection available", asyncPagingOptions.id);
+                    return Futures.immediateFuture(false);
+                }
+
+                connection = currentPool.borrowConnection(poolingOptions.getPoolTimeoutMillis(), TimeUnit.MILLISECONDS);
+            }
             if (logger.isTraceEnabled())
                 logger.trace("Sending cancellation request for {} to {}", asyncPagingOptions.id, host);
             Connection.Future startupResponseFuture = connection.write(Requests.Cancel.asyncPaging(asyncPagingOptions.id));
             return Futures.transform(startupResponseFuture, new AsyncFunction<Message.Response, Boolean>() {
                 @Override
                 public ListenableFuture<Boolean> apply(Message.Response response) throws Exception {
-                    try {
-                        if (logger.isTraceEnabled())
-                            logger.trace("Cancellation request for {} received {}", asyncPagingOptions.id, response);
-                        if (response instanceof Responses.Result.Void) {
-                            return Futures.immediateFuture(true);
-                        } else {
-                            return Futures.immediateFuture(false);
-                        }
-                    }
-                    finally {
-                        connection.release();
+                    if (logger.isTraceEnabled())
+                        logger.trace("Cancellation request for {} received {}", asyncPagingOptions.id, response);
+                    if (response instanceof Responses.Result.Void) {
+                        return Futures.immediateFuture(true);
+                    } else {
+                        return Futures.immediateFuture(false);
                     }
                 }
             }, handler.manager().configuration().getPoolingOptions().getInitializationExecutor());

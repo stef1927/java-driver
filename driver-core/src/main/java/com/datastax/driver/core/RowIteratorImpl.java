@@ -94,9 +94,14 @@ class RowIteratorImpl extends RowIterator {
         }
 
         void close() {
-            if (rowIterator != null) {
-                rowIterator.close();
-                rowIterator = null;
+            try {
+                if (rowIterator != null) {
+                    rowIterator.close();
+                    rowIterator = null;
+                }
+            }
+            catch (Exception ex) {
+                logger.error("Failed to release row iterator", ex);
             }
         }
 
@@ -253,8 +258,13 @@ class RowIteratorImpl extends RowIterator {
             isClosed = true;
             currentPage.close();
 
-            if (!currentPage.last)
-                cb.stop();
+            try {
+                if (!currentPage.last)
+                    cb.stop();
+            }
+            finally {
+                cb.release();
+            }
         }
     }
 
