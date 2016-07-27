@@ -83,6 +83,10 @@ class Connection {
     // Used by connection pooling to count how many requests are "in flight" on that connection.
     final AtomicInteger inFlight = new AtomicInteger(0);
 
+    // This indicates that the connection is temporarily reserved by a single callback that is
+    // receiving multiple messages from the server
+    final AtomicBoolean reserved = new AtomicBoolean(false);
+
     private final AtomicInteger writer = new AtomicInteger(0);
     private volatile String keyspace;
 
@@ -1000,7 +1004,7 @@ class Connection {
                      *   1) The connection has been defuncted due to some internal error and we've raced between removing the
                      *      handler and actually closing the connection; since the original error has been logged, we're fine
                      *      ignoring this completely.
-                     *   2) This request has timed out. In that case, we've already switched to another host (or errored out
+                     *   2) This request has timed out. In that case, we've already switched to another host (or errred out
                      *      to the user). So log it for debugging purpose, but it's fine ignoring otherwise.
                      */
                     streamIdHandler.unmark(streamId);
@@ -1162,11 +1166,6 @@ class Connection {
         @Override
         public void register(RequestHandler handler) {
             // noop, we don't care about the handler here so far
-        }
-
-        @Override
-        public boolean retainConnection(Connection connection) {
-            return false;
         }
 
         @Override

@@ -22,22 +22,23 @@ import com.google.common.util.concurrent.ListenableFuture;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.concurrent.*;
-
 /**
- * A request handler callback that receives multiple results asynchronously and pushes them to a queue that is
- * then read by a AsyncResultSetIterator.
+ * Connection callback for receiving multiple asynchronous results from the server
+ * by pushing them to a queue.
  */
-class AsyncRequestHandlerCallback implements RequestHandler.Callback {
+class AsyncRequestHandlerCallback implements Connection.ResponseCallback {
 
     private static final Logger logger = LoggerFactory.getLogger(AsyncRequestHandlerCallback.class);
 
     private final RowIteratorImpl.PageQueue queue;
     private final Message.Request request;
     private final AsyncPagingOptions asyncPagingOptions;
-    private RequestHandler handler;
+    private final Statement statement;
+    private final SessionManager session;
+    private final RequestHandler.QueryPlan queryPlan;
+    private volatile Host host;
     private volatile boolean stopped;
-    private Connection connection;
+    private volatile Connection connection;
 
     AsyncRequestHandlerCallback(RowIteratorImpl.PageQueue queue,
                                 Cluster.Manager manager,
@@ -46,6 +47,9 @@ class AsyncRequestHandlerCallback implements RequestHandler.Callback {
         this.queue = queue;
         this.request = request;
         this.asyncPagingOptions = asyncPagingOptions;
+        this.statement = queue.statement;
+        this.session = queue.session;
+        this.queryPlan = new RequestHandler.QueryPlan(manager.loadBalancingPolicy().newQueryPlan(statement.getKeyspace(), statement));
 
         manager.addAsyncHandler(this);
     }
@@ -55,23 +59,137 @@ class AsyncRequestHandlerCallback implements RequestHandler.Callback {
     }
 
     @Override
-    public void register(RequestHandler handler) {
-        this.handler = handler;
-    }
-
-    @Override
-    public boolean retainConnection(Connection connection) {
-        this.connection = connection;
-        return true;
-    }
-
-    @Override
     public Message.Request request() {
         return request;
     }
 
+    /** Stop sending results to the queue */
+    public void stop() {
+        stopped = true;
+
+        final ListenableFuture<Boolean> fut = sendCancelRequest();
+        try {
+            boolean ret = fut.get();
+            if (logger.isTraceEnabled())
+                logger.trace("Cancellation request for {} {}", asyncPagingOptions.id, ret ? "succeeded" : "failed");
+        }
+        catch (Exception ex)
+        {
+            logger.error("Cancellation request for {} failed with exception", asyncPagingOptions.id, ex);
+        }
+    }
+
+    public void release() {
+        if (connection != null) {
+            connection.release();
+            connection = null;
+            host = null;
+        }
+    }
+
+    public void sendRequest() {
+        maybeConnect();
+        connection.write(this, -1, false);
+    }
+
+    private void maybeConnect() {
+        if (connection != null) {
+            assert host != null : "Expected host with connection";
+            return;
+        }
+
+        while ((host = queryPlan.next()) != null && !stopped) {
+            try {
+                HostConnectionPool currentPool = session.pools.get(host);
+                if (currentPool == null || currentPool.isClosed())
+                    continue;
+
+                connection = currentPool.reserveConnection();
+                break;
+            }
+            catch (Exception ex) {
+                logger.error("[{}] Failed to connect to {}", pagingOptions().id, host, ex);
+
+                if (metricsEnabled())
+                    metrics().getErrorMetrics().getConnectionErrors().inc();
+
+                host = null;
+                connection = null;
+            }
+        }
+
+        if (connection == null)
+            throw new RuntimeException("Could not connect to any hosts");
+    }
+
+    private boolean metricsEnabled() {
+        return session.configuration().getMetricsOptions().isEnabled();
+    }
+
+    private Metrics metrics() {
+        return session.cluster.manager.metrics;
+    }
+
+
+    /**
+     * Send a cancel message for this async session so that the server can release resources.
+     *
+     * @return - a future returning a boolean indicating if the server has acknowledged receipt of the cancel request.
+     */
+    private ListenableFuture<Boolean> sendCancelRequest()
+    {
+        if (host == null) {
+            logger.error("Cannot send cancel request for {}, no host", asyncPagingOptions.id);
+            return Futures.immediateFuture(false);
+        }
+
+        if (connection == null) {
+            logger.error("Cannot send cancel request for {}, not connected", asyncPagingOptions.id);
+            return Futures.immediateFuture(false);
+        }
+        try {
+            if (logger.isTraceEnabled())
+                logger.trace("Sending cancel request for {} to {}", asyncPagingOptions.id, host);
+
+            Connection.Future fut = connection.write(Requests.Cancel.asyncPaging(asyncPagingOptions.id));
+            return Futures.transform(fut, new AsyncFunction<Message.Response, Boolean>() {
+                @Override
+                public ListenableFuture<Boolean> apply(Message.Response response) throws Exception {
+                    if (logger.isTraceEnabled())
+                        logger.trace("Cancellation request for {} received {}", asyncPagingOptions.id, response);
+                    if (response instanceof Responses.Result.Void) {
+                        return Futures.immediateFuture(true);
+                    } else {
+                        return Futures.immediateFuture(false);
+                    }
+                }
+            }, session.configuration().getPoolingOptions().getInitializationExecutor());
+        }
+        catch (Exception ex)
+        {
+            logger.error("Failed to cancel request {} due to exception", asyncPagingOptions.id, ex);
+            return Futures.immediateFailedFuture(ex);
+        }
+    }
+
+    private void setException(Exception ex)
+    {
+        if (!stopped)
+            queue.put(ex);
+
+        session.cluster.manager.removeAsyncHandler(this);
+    }
+
+    void onData(Responses.Result.Rows rows) {
+        if (!stopped)
+            queue.put(rows);
+
+        if (rows.metadata.asyncPagingParams.last)
+            session.cluster.manager.removeAsyncHandler(this);
+    }
+
     @Override
-    public void onSet(Connection connection, Message.Response response, ExecutionInfo info, Statement statement, long latency) {
+    public void onSet(Connection connection, Message.Response response, long latency, int retryCount) {
         try {
             switch (response.type) {
                 case RESULT:
@@ -97,100 +215,6 @@ class AsyncRequestHandlerCallback implements RequestHandler.Callback {
             // If we get a bug here, the client will not get it, so better forwarding the error
             setException(new DriverInternalError("Unexpected error while processing response from " + connection.address, e));
         }
-    }
-
-    void onData(Responses.Result.Rows rows) {
-        if (!stopped)
-            queue.put(rows);
-    }
-
-    /** Stop sending results to the queue */
-    public void stop() {
-        stopped = true;
-
-        final ListenableFuture<Boolean> fut = sendCancelRequest();
-        try {
-            boolean ret = fut.get();
-            if (logger.isTraceEnabled())
-                logger.trace("Cancellation request for {} {}", asyncPagingOptions.id, ret ? "succeeded" : "failed");
-        }
-        catch (Exception ex)
-        {
-            logger.error("Cancellation request for {} failed with exception", asyncPagingOptions.id, ex);
-        }
-    }
-
-    public void release() {
-        if (connection != null) {
-            connection.release();
-            connection = null;
-        }
-    }
-
-    /**
-     * Send a cancel message for this async session so that the server can release resources.
-     *
-     * @return - a future returning a boolean indicating if the server has acknowledged receipt of the cancel request.
-     */
-    private ListenableFuture<Boolean> sendCancelRequest()
-    {
-        ExecutionInfo executionInfo = handler.executionInfo();
-        if (executionInfo == null) {
-            logger.error("Cannot send cancel request for {}, no execution info", asyncPagingOptions.id);
-            return Futures.immediateFuture(false);
-        }
-
-        Host host = executionInfo.getQueriedHost();
-        if (host == null) {
-            logger.error("Cannot send cancel request for {}, no host", asyncPagingOptions.id);
-            return Futures.immediateFuture(false);
-        }
-
-        try {
-            if (connection == null) {
-                final PoolingOptions poolingOptions = handler.manager().configuration().getPoolingOptions();
-                HostConnectionPool currentPool = handler.manager().pools.get(host);
-                if (currentPool == null || currentPool.isClosed()) {
-                    logger.error("Cannot send cancel request for {}, no connection available", asyncPagingOptions.id);
-                    return Futures.immediateFuture(false);
-                }
-
-                connection = currentPool.borrowConnection(poolingOptions.getPoolTimeoutMillis(), TimeUnit.MILLISECONDS);
-            }
-            if (logger.isTraceEnabled())
-                logger.trace("Sending cancellation request for {} to {}", asyncPagingOptions.id, host);
-            Connection.Future startupResponseFuture = connection.write(Requests.Cancel.asyncPaging(asyncPagingOptions.id));
-            return Futures.transform(startupResponseFuture, new AsyncFunction<Message.Response, Boolean>() {
-                @Override
-                public ListenableFuture<Boolean> apply(Message.Response response) throws Exception {
-                    if (logger.isTraceEnabled())
-                        logger.trace("Cancellation request for {} received {}", asyncPagingOptions.id, response);
-                    if (response instanceof Responses.Result.Void) {
-                        return Futures.immediateFuture(true);
-                    } else {
-                        return Futures.immediateFuture(false);
-                    }
-                }
-            }, handler.manager().configuration().getPoolingOptions().getInitializationExecutor());
-        }
-        catch (Exception ex)
-        {
-            logger.error("Failed to cancel request {} due to exception", asyncPagingOptions.id, ex);
-            return Futures.immediateFailedFuture(ex);
-        }
-    }
-
-    private void setException(Exception ex)
-    {
-        if (!stopped)
-            queue.put(ex);
-    }
-
-    @Override
-    public void onSet(Connection connection, Message.Response response, long latency, int retryCount) {
-        // This is only called for internal calls (i.e, when the callback is not wrapped in ResponseHandler),
-        // so don't bother with ExecutionInfo.
-        onSet(connection, response, null, null, latency);
     }
 
     @Override

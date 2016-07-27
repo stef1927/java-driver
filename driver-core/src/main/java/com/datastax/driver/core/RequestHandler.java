@@ -87,24 +87,6 @@ class RequestHandler {
         this.startTime = System.nanoTime();
     }
 
-    public Statement statement() {
-        return statement;
-    }
-
-    public SessionManager manager() {
-        return manager;
-    }
-
-    public ExecutionInfo executionInfo() {
-        String id = RequestHandler.this.id + "-" + executionCount.get();
-        for (SpeculativeExecution info : runningExecutions) {
-            if (info.id.equals(id) && info.current != null)
-                return info.current.defaultExecutionInfo;
-        }
-        return null;
-    }
-
-
     void sendRequest() {
         startNewExecution();
     }
@@ -243,15 +225,6 @@ class RequestHandler {
         void onSet(Connection connection, Message.Response response, ExecutionInfo info, Statement statement, long latency);
 
         void register(RequestHandler handler);
-
-        /**
-         * A callback may choose not to release the connection back to the pool after
-         * receiving a response or on error, in case it wants to use it again.
-         * @param connection - the connection to be released
-         * @return true if the callback wants to retain the connection, in which case it must release it itself later on,
-         *         false if the callback wants the caller to release the connection immediately
-         */
-        boolean retainConnection(Connection connection);
     }
 
     /**
@@ -471,19 +444,6 @@ class RequestHandler {
                 return request;
         }
 
-        /**
-         * Release the connection only if the callback no longer needs it, see
-         * {@link AsyncRequestHandlerCallback}, which needs to keep the connection
-         * util all asynchronous pages are received (for performance reasons since
-         * sharing a connection and Netty thread is not very good) and for sending
-         * a cancel request, if required.
-         * @param connection
-         */
-        private void maybeReleaseConnection(Connection connection) {
-            if (!callback.retainConnection(connection))
-                connection.release();
-        }
-
         @Override
         public void onSet(Connection connection, Message.Response response, long latency, int retryCount) {
             QueryState queryState = queryStateRef.get();
@@ -499,7 +459,7 @@ class RequestHandler {
             try {
                 switch (response.type) {
                     case RESULT:
-                        maybeReleaseConnection(connection);
+                        connection.release();
                         setFinalResult(connection, response);
                         break;
                     case ERROR:
@@ -509,7 +469,7 @@ class RequestHandler {
                         RetryPolicy retryPolicy = retryPolicy();
                         switch (err.code) {
                             case READ_TIMEOUT:
-                                maybeReleaseConnection(connection);
+                                connection.release();
                                 assert err.infos instanceof ReadTimeoutException;
                                 ReadTimeoutException rte = (ReadTimeoutException) err.infos;
                                 retry = retryPolicy.onReadTimeout(statement,
@@ -527,7 +487,7 @@ class RequestHandler {
                                 }
                                 break;
                             case WRITE_TIMEOUT:
-                                maybeReleaseConnection(connection);
+                                connection.release();
                                 assert err.infos instanceof WriteTimeoutException;
                                 WriteTimeoutException wte = (WriteTimeoutException) err.infos;
                                 retry = retryPolicy.onWriteTimeout(statement,
@@ -545,7 +505,7 @@ class RequestHandler {
                                 }
                                 break;
                             case UNAVAILABLE:
-                                maybeReleaseConnection(connection);
+                                connection.release();
                                 assert err.infos instanceof UnavailableException;
                                 UnavailableException ue = (UnavailableException) err.infos;
                                 retry = retryPolicy.onUnavailable(statement,
@@ -562,7 +522,7 @@ class RequestHandler {
                                 }
                                 break;
                             case OVERLOADED:
-                                maybeReleaseConnection(connection);
+                                connection.release();
                                 assert exceptionToReport instanceof OverloadedException;
                                 logger.warn("Host {} is overloaded.", connection.address);
                                 retry = retryPolicy.onRequestError(statement,
@@ -577,7 +537,7 @@ class RequestHandler {
                                 }
                                 break;
                             case SERVER_ERROR:
-                                maybeReleaseConnection(connection);
+                                connection.release();
                                 assert exceptionToReport instanceof ServerError;
                                 logger.warn("{} replied with server error ({}), defuncting connection.", connection.address, err.message);
                                 // Defunct connection
@@ -594,7 +554,7 @@ class RequestHandler {
                                 }
                                 break;
                             case IS_BOOTSTRAPPING:
-                                maybeReleaseConnection(connection);
+                                connection.release();
                                 assert exceptionToReport instanceof BootstrappingException;
                                 logger.error("Query sent to {} but it is bootstrapping. This shouldn't happen but trying next host.", connection.address);
                                 if (metricsEnabled()) {
@@ -610,7 +570,7 @@ class RequestHandler {
                                 PreparedStatement toPrepare = manager.cluster.manager.preparedQueries.get(id);
                                 if (toPrepare == null) {
                                     // This shouldn't happen
-                                    maybeReleaseConnection(connection);
+                                    connection.release();
                                     String msg = String.format("Tried to execute unknown prepared query %s", id);
                                     logger.error(msg);
                                     setFinalException(connection, new DriverInternalError(msg));
@@ -624,7 +584,7 @@ class RequestHandler {
                                     // a prepared statement with the wrong keyspace set.
                                     // Fail fast (we can't change the keyspace to reprepare, because we're using a pooled connection
                                     // that's shared with other requests).
-                                    maybeReleaseConnection(connection);
+                                    connection.release();
                                     throw new IllegalStateException(String.format("Statement was prepared on keyspace %s, can't execute it on %s (%s)",
                                             toPrepare.getQueryKeyspace(), connection.keyspace(), toPrepare.getQueryString()));
                                 }
@@ -637,7 +597,7 @@ class RequestHandler {
                                 // we're done for now, the prepareAndRetry callback will handle the rest
                                 return;
                             default:
-                                maybeReleaseConnection(connection);
+                                connection.release();
                                 if (metricsEnabled())
                                     metrics().getErrorMetrics().getOthers().inc();
                                 break;
@@ -650,7 +610,7 @@ class RequestHandler {
                         }
                         break;
                     default:
-                        maybeReleaseConnection(connection);
+                        connection.release();
                         setFinalResult(connection, response);
                         break;
                 }
@@ -694,7 +654,7 @@ class RequestHandler {
                         return;
                     }
 
-                    maybeReleaseConnection(connection);
+                    connection.release();
 
                     switch (response.type) {
                         case RESULT:
@@ -733,7 +693,7 @@ class RequestHandler {
                                 retryCount, queryState, queryStateRef.get());
                         return false;
                     }
-                    maybeReleaseConnection(connection);
+                    connection.release();
                     logError(connection.address, new OperationTimedOutException(connection.address, "Timed out waiting for response to PREPARE message"));
                     retry(false, null);
                     return true;
@@ -753,7 +713,7 @@ class RequestHandler {
 
             Host queriedHost = current;
             try {
-                maybeReleaseConnection(connection);
+                connection.release();
 
                 if (exception instanceof ConnectionException) {
                     RetryPolicy retryPolicy = retryPolicy();
@@ -793,7 +753,7 @@ class RequestHandler {
             OperationTimedOutException timeoutException = new OperationTimedOutException(connection.address, "Timed out waiting for server response");
 
             try {
-                maybeReleaseConnection(connection);
+                connection.release();
 
                 RetryPolicy retryPolicy = retryPolicy();
                 RetryPolicy.RetryDecision decision = retryPolicy.onRequestError(statement, request().consistency(), timeoutException, retriesByPolicy);

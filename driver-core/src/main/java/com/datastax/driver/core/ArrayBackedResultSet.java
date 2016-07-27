@@ -353,11 +353,6 @@ abstract class ArrayBackedResultSet implements ResultSet {
                 }
 
                 @Override
-                public boolean retainConnection(Connection connection) {
-                    return false;
-                }
-
-                @Override
                 public void onSet(Connection connection, Message.Response response, ExecutionInfo info, Statement statement, long latency) {
                     try {
                         switch (response.type) {

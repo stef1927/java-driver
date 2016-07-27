@@ -19,17 +19,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
+import java.util.*;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 class RowIteratorImpl extends RowIterator {
     private static final Logger logger = LoggerFactory.getLogger(RowIteratorImpl.class);
 
     private final AsyncRequestHandlerCallback cb;
     private final PageQueue queue;
-    private final int[] queueSizeDist = new int[PageQueue.LENGTH + 1];
     private final SessionManager session;
     private final Cluster.Manager manager;
     private final Statement statement;
@@ -57,28 +55,21 @@ class RowIteratorImpl extends RowIterator {
         int seqNo = 0;
         boolean last = false;
 
-        void fill(Exception exception) {
-            close();
+        Page() {
+
+        }
+
+        Page(Exception exception) {
             this.exception = exception;
         }
 
-        void fill(Responses.Result.Rows response) {
+        Page(Responses.Result.Rows response) {
             this.rowIterator = response.rowIterator();
             this.columnDefinitions = response.metadata.columns;
             this.pagingState = response.metadata.pagingState;
             this.exception = null;
             this.seqNo = response.metadata.asyncPagingParams.seqNo;
             this.last = response.metadata.asyncPagingParams.last;
-        }
-
-        void fill(Page other)
-        {
-            this.rowIterator = other.rowIterator;
-            this.columnDefinitions = other.columnDefinitions;
-            this.pagingState = other.pagingState;
-            this.exception = other.exception;
-            this.seqNo = other.seqNo;
-            this.last = other.last;
         }
 
         boolean hasNext() {
@@ -115,111 +106,58 @@ class RowIteratorImpl extends RowIterator {
     }
 
     /**
-     * A non-blocking bounded queue of results. This is an ad-hoc adaptation of the LMAX disruptor that
-     * supports a single consumer (the iterator, which has been declared as such in the documentation)
-     * and a single producer (the Netty event loop thread of the channel).
-     * The waiting strategy is a loop with a Thread.yield.
-     * See the technical paper at https://lmax-exchange.github.io/disruptor/ for more details.
+     * The queue used to feed messages from the Netty thread to the consumer thread
      */
     final static class PageQueue {
-        static int LENGTH = 4; // this should be a power of two
+        static final int CAPACITY = 4;
         final Statement statement;
         final SessionManager session;
         final long timeoutMillis;
-        final Page[] pages = new Page[LENGTH];
-
-        volatile int producerIndex = -1; // the index where the producer is writing to
-        volatile int publishedIndex = -1; // the index where the producer has written to
-        volatile int consumerIndex = 0; // the index where the (single) consumer is reading from
+        final ArrayBlockingQueue<Page> queue;
 
         PageQueue(Statement statement, SessionManager session) {
             this.statement = statement;
             this.session = session;
-            timeoutMillis = statement.getReadTimeoutMillis() > 0
+            this.timeoutMillis = statement.getReadTimeoutMillis() > 0
                     ? statement.getReadTimeoutMillis()
                     : session.getCluster().manager.connectionFactory.getReadTimeoutMillis();
+            this.queue = new ArrayBlockingQueue<Page>(CAPACITY);
+        }
 
-            assert (pages.length & (pages.length - 1)) == 0 : "Results length must be a power of 2";
-            for (int i = 0; i < pages.length; i++) {
-                pages[i] = new Page(); //pre-allocate in order to reduce garbage and make it cache friendly
+        public Page take() {
+            try {
+                Page ret = queue.poll(timeoutMillis, TimeUnit.MILLISECONDS);
+                if (ret == null)
+                    throw new RuntimeException("Timed out reading result from queue");
+
+                return ret;
+            }
+            catch (InterruptedException ex) {
+                throw new RuntimeException("Interrupted whilst reading page from queue", ex);
             }
         }
 
-        // this return the modulo for a power of two
-        private int index(int i)
-        {
-            return i & (pages.length - 1);
-        }
-
-        /**
-         This method is called by the consumer, before reading it must wait
-         until a published result is available.
-         */
-        void take(Page ret) {
-            long start = System.currentTimeMillis();
-            while (consumerIndex > publishedIndex) {
-                Thread.yield();
-
-                if (System.currentTimeMillis() - start > timeoutMillis)
-                    throw new RuntimeException("Timed out reading result from slot");
-            }
-
-            if (logger.isTraceEnabled())
-                logger.trace("Reading from index {}...", consumerIndex);
-
-            ret.fill(pages[index(consumerIndex)]);
-            consumerIndex++;
-        }
-
-        /**
-         * This method is called by the producer, {@link AsyncRequestHandlerCallback}, first we
-         * increase the producer index to the slot we'll be writing to, then wait for the consumer
-         * to have read it, then write and publish it.
-         */
         public void put(Exception exception) {
-            long start = System.currentTimeMillis();
-            producerIndex++;
-            waitForConsumer(start);
-
-            if (logger.isTraceEnabled())
-                logger.trace("Writing exception at index {}", producerIndex);
-
-            pages[index(producerIndex)].fill(exception);
-            publishedIndex = producerIndex;
+            put(new Page(exception));
         }
 
-        /**
-         * This method is called by the producer, {@link AsyncRequestHandlerCallback}, first we
-         * increase the producer index to the slot we'll be writing to, then wait for the consumer
-         * to have read it, then write and publish it.
-         */
+
         public void put(Responses.Result.Rows response) {
-            long start = System.currentTimeMillis();
-            producerIndex++;
-            waitForConsumer(start);
-
-            if (logger.isTraceEnabled())
-                logger.trace("Writing result with seq No {} at index {}",
-                        response.metadata.asyncPagingParams.seqNo, producerIndex);
-
-            pages[index(producerIndex)].fill(response);
-            publishedIndex = producerIndex;
+            put(new Page(response));
         }
 
-        /**
-         * Wait for the consumer to have consumed the slow the producer will write to.
-         */
-        private void waitForConsumer(long start) {
-            while(producerIndex - consumerIndex >= pages.length) {
-                Thread.yield(); //wait for consumer to catch up
-
-                if (System.currentTimeMillis() - start > timeoutMillis)
-                    throw new RuntimeException("Timed out waiting consumer to catch up");
+        private void put(Page page) {
+            try {
+                if (!queue.offer(page, timeoutMillis, TimeUnit.MILLISECONDS))
+                    throw new RuntimeException("Timed out inserting page into queue");
+            }
+            catch (InterruptedException ex) {
+                throw new RuntimeException("Interrupted whilst inserting page into queue", ex);
             }
         }
 
         public int size() {
-            return publishedIndex - consumerIndex + 1;
+            return queue.size();
         }
     }
 
@@ -252,8 +190,7 @@ class RowIteratorImpl extends RowIterator {
     public void close() {
         if (!isClosed) {
             if (logger.isTraceEnabled())
-                logger.trace("Closing iterator, remaining: {}/{}, queue size distribution: {}",
-                             currentPage.remaining(), queue.size(), Arrays.toString(queueSizeDist));
+                logger.trace("Closing iterator, remaining: {}/{},", currentPage.remaining(), queue.size());
 
             isClosed = true;
             currentPage.close();
@@ -322,11 +259,8 @@ class RowIteratorImpl extends RowIterator {
         }
 
         long nextSeqNo = currentPage.seqNo + 1;
-
-        if (logger.isTraceEnabled())
-            queueSizeDist[queue.size()]++;
-
-        queue.take(currentPage);
+        currentPage.close();
+        currentPage = queue.take();
 
         if (logger.isTraceEnabled())
             logger.trace("Iterator switched to page {}", currentPage);
@@ -395,8 +329,7 @@ class RowIteratorImpl extends RowIterator {
             final AsyncRequestHandlerCallback cb = new AsyncRequestHandlerCallback(queue, session.getCluster().manager,
                     session.makeRequestMessage(statement, pagingState, nextPagingOptions), nextPagingOptions);
 
-            new RequestHandler(session, cb, statement).sendRequest();
-
+            cb.sendRequest();
             return new StateBasedIterator(this, new RowIteratorImpl(cb, queue));
         }
     }
@@ -461,11 +394,7 @@ class RowIteratorImpl extends RowIterator {
             if (isClosed)
                 return false;
 
-            if (currentRow < rows.size()) {
-               return true;
-            }
-
-            return inner.hasNext();
+            return (currentRow < rows.size()) || inner.hasNext();
         }
 
         @Override

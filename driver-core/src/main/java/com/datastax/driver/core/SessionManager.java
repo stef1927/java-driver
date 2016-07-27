@@ -154,13 +154,13 @@ class SessionManager extends AbstractSession {
                 makeRequestMessage(statement, null, pagingOptions), pagingOptions);
 
         if (isInit) {
-            new RequestHandler(this, cb, statement).sendRequest();
+            cb.sendRequest();
         }
         else {
             this.initAsync().addListener(new Runnable() {
                 @Override
                 public void run() {
-                    new RequestHandler(SessionManager.this, cb, statement).sendRequest();
+                    cb.sendRequest();
                 }
             }, executor());
         }

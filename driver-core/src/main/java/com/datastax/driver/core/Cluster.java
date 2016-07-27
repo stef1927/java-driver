@@ -2306,7 +2306,7 @@ public class Cluster implements Closeable {
 
             if (response instanceof Responses.Result.Rows) {
                 Responses.Result.Rows rows = (Responses.Result.Rows)response;
-                if (handleStreamingResults(rows))
+                if (handleAsyncResults(rows))
                     return;
             }
 
@@ -2448,11 +2448,17 @@ public class Cluster implements Closeable {
             return asyncHandlers.putIfAbsent(cb.pagingOptions().id, cb) == null;
         }
 
+        public boolean removeAsyncHandler(AsyncRequestHandlerCallback cb)
+        {
+            return asyncHandlers.remove(cb.pagingOptions().id, cb);
+        }
+
         /**
-         * Handle data streamed by the server
-         * @param rows
+         * Handle results pushed by the server asynchronously if there is a handler registered.
+         *
+         * @param rows - the result rows
          */
-        private boolean handleStreamingResults(Responses.Result.Rows rows)
+        private boolean handleAsyncResults(Responses.Result.Rows rows)
         {
             if (!rows.metadata.asyncPagingParams.dataAvailable())
                 return false;
