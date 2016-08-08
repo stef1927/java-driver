@@ -110,6 +110,7 @@ class Frame {
                 return fullFrame.readByte();
             case V3:
             case V4:
+            case V5:
                 return fullFrame.readShort();
             default:
                 throw version.unsupported();
@@ -152,6 +153,7 @@ class Frame {
                     return 8;
                 case V3:
                 case V4:
+                case V5:
                     return 9;
                 default:
                     throw version.unsupported();
@@ -163,7 +165,8 @@ class Frame {
             COMPRESSED,
             TRACING,
             CUSTOM_PAYLOAD,
-            WARNING;
+            WARNING,
+            USE_BETA;
 
             static EnumSet<Flag> deserialize(int flags) {
                 EnumSet<Flag> set = EnumSet.noneOf(Flag.class);
@@ -268,6 +271,7 @@ class Frame {
                     break;
                 case V3:
                 case V4:
+                case V5:
                     header.writeShort(streamId);
                     break;
                 default:

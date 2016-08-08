@@ -317,6 +317,8 @@ abstract class Message {
         @Override
         protected void encode(ChannelHandlerContext ctx, Request request, List<Object> out) throws Exception {
             EnumSet<Frame.Header.Flag> flags = EnumSet.noneOf(Frame.Header.Flag.class);
+            if (protocolVersion == ProtocolVersion.BETA_VERSION)
+                flags.add(Frame.Header.Flag.USE_BETA);
             if (request.isTracingRequested())
                 flags.add(Frame.Header.Flag.TRACING);
             Map<String, ByteBuffer> customPayload = request.getCustomPayload();

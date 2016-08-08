@@ -354,6 +354,7 @@ class Requests {
                 case V2:
                 case V3:
                 case V4:
+                case V5:
                     CBUtil.writeConsistencyLevel(consistency, dest);
                     dest.writeByte((byte) QueryFlag.serialize(flags));
                     if (flags.contains(QueryFlag.EXTENDED_FLAGS))
@@ -374,7 +375,7 @@ class Requests {
                         CBUtil.writeConsistencyLevel(serialConsistency, dest);
                     if (version.compareTo(ProtocolVersion.V3) >= 0 && flags.contains(QueryFlag.DEFAULT_TIMESTAMP))
                         dest.writeLong(defaultTimestamp);
-                    if (version.compareTo(ProtocolVersion.V4) >= 0 && extendedFlags.contains(ExtendedQueryFlag.WITH_ASYNC_PAGING))
+                    if (version.compareTo(ProtocolVersion.V5) >= 0 && extendedFlags.contains(ExtendedQueryFlag.WITH_ASYNC_PAGING))
                         encode(asyncPagingOptions, dest);
 
                     break;
@@ -393,6 +394,7 @@ class Requests {
                 case V2:
                 case V3:
                 case V4:
+                case V5:
                     int size = 0;
                     size += CBUtil.sizeOfConsistencyLevel(consistency);
                     size += 1; // flags
@@ -559,6 +561,7 @@ class Requests {
                     break;
                 case V3:
                 case V4:
+                case V5:
                     CBUtil.writeConsistencyLevel(consistency, dest);
                     dest.writeByte((byte) QueryFlag.serialize(flags));
                     if (flags.contains(QueryFlag.SERIAL_CONSISTENCY))
@@ -577,6 +580,7 @@ class Requests {
                     return CBUtil.sizeOfConsistencyLevel(consistency);
                 case V3:
                 case V4:
+                case V5:
                     int size = 0;
                     size += CBUtil.sizeOfConsistencyLevel(consistency);
                     size += 1; // flags

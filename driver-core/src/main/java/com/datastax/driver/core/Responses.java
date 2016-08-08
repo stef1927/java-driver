@@ -645,6 +645,7 @@ class Responses {
                         case V2:
                         case V3:
                         case V4:
+                        case V5:
                             return Rows.Metadata.decode(body, version, codecRegistry);
                         default:
                             throw version.unsupported();
@@ -698,6 +699,7 @@ class Responses {
                             return new SchemaChange(change, targetType, targetKeyspace, targetName, targetSignature);
                         case V3:
                         case V4:
+                        case V5:
                             change = CBUtil.readEnumValue(Change.class, body);
                             targetType = CBUtil.readEnumValue(SchemaElement.class, body);
                             targetKeyspace = CBUtil.readString(body);
